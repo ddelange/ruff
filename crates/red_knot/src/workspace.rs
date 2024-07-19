@@ -1,6 +1,4 @@
-// TODO: Fix clippy warnings created by salsa macros
-#![allow(clippy::used_underscore_binding)]
-
+use salsa::Setter as _;
 use std::{collections::BTreeMap, sync::Arc};
 
 use rustc_hash::{FxBuildHasher, FxHashSet};
@@ -64,7 +62,6 @@ mod metadata;
 ///    holding on to the most fundamental settings required for checking.
 #[salsa::input]
 pub struct Workspace {
-    #[id]
     #[return_ref]
     root_buf: SystemPathBuf,
 
@@ -87,7 +84,6 @@ pub struct Package {
     pub name: Name,
 
     /// The path to the root directory of the package.
-    #[id]
     #[return_ref]
     root_buf: SystemPathBuf,
 

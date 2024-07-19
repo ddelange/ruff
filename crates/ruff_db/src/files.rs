@@ -2,14 +2,16 @@ use std::sync::Arc;
 
 use countme::Count;
 use dashmap::mapref::entry::Entry;
+use salsa::Setter;
+
+pub use path::FilePath;
+use ruff_notebook::{Notebook, NotebookError};
 
 use crate::file_revision::FileRevision;
 use crate::files::private::FileStatus;
 use crate::system::SystemPath;
 use crate::vendored::VendoredPath;
 use crate::{Db, FxDashMap};
-pub use path::FilePath;
-use ruff_notebook::{Notebook, NotebookError};
 
 mod path;
 
@@ -155,7 +157,6 @@ impl std::fmt::Debug for Files {
 #[salsa::input]
 pub struct File {
     /// The path of the file.
-    #[id]
     #[return_ref]
     pub path: FilePath,
 

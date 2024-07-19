@@ -2,7 +2,6 @@ use std::sync::Mutex;
 
 use clap::Parser;
 use crossbeam::channel as crossbeam_channel;
-use salsa::ParallelDatabase;
 use tracing::subscriber::Interest;
 use tracing::{Level, Metadata};
 use tracing_subscriber::filter::LevelFilter;
@@ -181,21 +180,22 @@ impl MainLoop {
 
             match message {
                 MainLoopMessage::CheckWorkspace { revision } => {
-                    let db = db.snapshot();
+                    // let db = db.snapshot();
                     let orchestrator = self.orchestrator.clone();
 
                     // Spawn a new task that checks the workspace. This needs to be done in a separate thread
                     // to prevent blocking the main loop here.
-                    rayon::spawn(move || {
-                        if let Ok(result) = db.check() {
-                            orchestrator
-                                .send(OrchestratorMessage::CheckCompleted {
-                                    diagnostics: result,
-                                    revision,
-                                })
-                                .unwrap();
-                        }
-                    });
+                    // rayon::spawn(move || {
+
+                    if let Ok(result) = db.check() {
+                        orchestrator
+                            .send(OrchestratorMessage::CheckCompleted {
+                                diagnostics: result,
+                                revision,
+                            })
+                            .unwrap();
+                    }
+                    // });
                 }
                 MainLoopMessage::ApplyChanges(changes) => {
                     // Automatically cancels any pending queries and waits for them to complete.

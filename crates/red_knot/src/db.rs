@@ -1,32 +1,24 @@
 use std::panic::{AssertUnwindSafe, RefUnwindSafe};
 use std::sync::Arc;
 
-use salsa::{Cancelled, Database, DbWithJar};
+use salsa::Cancelled;
 
-use red_knot_module_resolver::{vendored_typeshed_stubs, Db as ResolverDb, Jar as ResolverJar};
-use red_knot_python_semantic::{Db as SemanticDb, Jar as SemanticJar};
+use red_knot_module_resolver::{vendored_typeshed_stubs, Db as ResolverDb};
+use red_knot_python_semantic::Db as SemanticDb;
 use ruff_db::files::{system_path_to_file, File, Files};
 use ruff_db::program::{Program, ProgramSettings};
 use ruff_db::system::System;
 use ruff_db::vendored::VendoredFileSystem;
-use ruff_db::{Db as SourceDb, Jar as SourceJar, Upcast};
+use ruff_db::{Db as SourceDb, Upcast};
 
-use crate::lint::{lint_semantic, lint_syntax, unwind_if_cancelled, Diagnostics};
+use crate::lint::Diagnostics;
 use crate::watch::{FileChangeKind, FileWatcherChange};
-use crate::workspace::{check_file, Package, Workspace, WorkspaceMetadata};
+use crate::workspace::{check_file, Workspace, WorkspaceMetadata};
 
-pub trait Db: DbWithJar<Jar> + SemanticDb + Upcast<dyn SemanticDb> {}
+#[salsa::db]
+pub trait Db: SemanticDb + Upcast<dyn SemanticDb> {}
 
-#[salsa::jar(db=Db)]
-pub struct Jar(
-    Workspace,
-    Package,
-    lint_syntax,
-    lint_semantic,
-    unwind_if_cancelled,
-);
-
-#[salsa::db(SourceJar, ResolverJar, SemanticJar, Jar)]
+#[salsa::db]
 pub struct RootDatabase {
     workspace: Option<Workspace>,
     storage: salsa::Storage<RootDatabase>,
@@ -166,10 +158,13 @@ impl Upcast<dyn ResolverDb> for RootDatabase {
     }
 }
 
+#[salsa::db]
 impl ResolverDb for RootDatabase {}
 
+#[salsa::db]
 impl SemanticDb for RootDatabase {}
 
+#[salsa::db]
 impl SourceDb for RootDatabase {
     fn vendored(&self) -> &VendoredFileSystem {
         vendored_typeshed_stubs()
@@ -184,17 +179,19 @@ impl SourceDb for RootDatabase {
     }
 }
 
-impl Database for RootDatabase {}
+#[salsa::db]
+impl salsa::Database for RootDatabase {}
 
+#[salsa::db]
 impl Db for RootDatabase {}
-
-impl salsa::ParallelDatabase for RootDatabase {
-    fn snapshot(&self) -> salsa::Snapshot<Self> {
-        salsa::Snapshot::new(Self {
-            workspace: self.workspace,
-            storage: self.storage.snapshot(),
-            files: self.files.snapshot(),
-            system: self.system.clone(),
-        })
-    }
-}
+//
+// impl salsa::ParallelDatabase for RootDatabase {
+//     fn snapshot(&self) -> salsa::Snapshot<Self> {
+//         salsa::Snapshot::new(Self {
+//             workspace: self.workspace,
+//             storage: self.storage.snapshot(),
+//             files: self.files.snapshot(),
+//             system: self.system.clone(),
+//         })
+//     }
+// }
