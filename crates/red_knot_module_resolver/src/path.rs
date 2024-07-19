@@ -153,7 +153,7 @@ impl ModuleResolutionPathBufInner {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ModuleResolutionPathBuf(ModuleResolutionPathBufInner);
+pub struct ModuleResolutionPathBuf(ModuleResolutionPathBufInner);
 
 impl ModuleResolutionPathBuf {
     /// Push a new part to the path,

@@ -1,11 +1,13 @@
 // TODO: Fix clippy warnings created by salsa macros
 #![allow(clippy::used_underscore_binding)]
 
+use std::collections::BTreeSet;
 use std::{collections::BTreeMap, sync::Arc};
 
 use rustc_hash::{FxBuildHasher, FxHashSet};
 
 pub use metadata::{PackageMetadata, WorkspaceMetadata};
+use red_knot_module_resolver::system_module_search_paths;
 use ruff_db::{
     files::{system_path_to_file, File},
     system::{walk_directory::WalkState, SystemPath, SystemPathBuf},
@@ -237,6 +239,30 @@ impl Workspace {
         } else {
             FxHashSet::default()
         }
+    }
+
+    /// Returns the paths that should be watched.
+    ///
+    /// The paths that require watching might change with every revision.
+    pub fn watch_paths(self, db: &dyn Db) -> FxHashSet<SystemPathBuf> {
+        let mut unique_paths: BTreeSet<_> = system_module_search_paths(db.upcast()).collect();
+        unique_paths.insert(self.root(db));
+
+        let mut not_nested_paths =
+            FxHashSet::with_capacity_and_hasher(unique_paths.len(), FxBuildHasher);
+        let mut paths = unique_paths.iter().copied().peekable();
+
+        // Filter out `/src/test` if `/src` is also in the set.
+        while let Some(path) = paths.next() {
+            // Skip over all paths that have the same prefix as this path.
+            while paths.peek().is_some_and(|next| next.starts_with(path)) {
+                paths.next();
+            }
+
+            not_nested_paths.insert(path.to_path_buf());
+        }
+
+        not_nested_paths
     }
 }
 

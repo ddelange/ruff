@@ -2,9 +2,10 @@ use std::sync::Mutex;
 
 use clap::Parser;
 use crossbeam::channel as crossbeam_channel;
+use rustc_hash::FxHashSet;
 use salsa::ParallelDatabase;
 use tracing::subscriber::Interest;
-use tracing::{Level, Metadata};
+use tracing::{info, Level, Metadata};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, Filter, SubscriberExt};
 use tracing_subscriber::{Layer, Registry};
@@ -144,6 +145,9 @@ struct MainLoop {
     /// The file system watcher, if running in watch mode.
     watcher: Option<Watcher>,
 
+    /// The paths that are being watched.
+    watch_paths: FxHashSet<SystemPathBuf>,
+
     verbosity: Option<VerbosityLevel>,
 }
 
@@ -156,6 +160,7 @@ impl MainLoop {
                 sender: sender.clone(),
                 receiver,
                 watcher: None,
+                watch_paths: FxHashSet::default(),
                 verbosity,
             },
             MainLoopCancellationToken { sender },
@@ -164,13 +169,12 @@ impl MainLoop {
 
     fn watch(mut self, db: &mut RootDatabase) -> anyhow::Result<()> {
         let sender = self.sender.clone();
-        let mut watcher = watch::directory_watcher(move |event| {
+        let watcher = watch::directory_watcher(move |event| {
             sender.send(MainLoopMessage::ApplyChanges(event)).unwrap();
         })?;
 
-        watcher.watch(db.workspace().root(db))?;
-
         self.watcher = Some(watcher);
+        self.update_watched_folders(db);
 
         self.run(db);
 
@@ -178,12 +182,12 @@ impl MainLoop {
     }
 
     #[allow(clippy::print_stderr)]
-    fn run(self, db: &mut RootDatabase) {
+    fn run(mut self, db: &mut RootDatabase) {
         // Schedule the first check.
         self.sender.send(MainLoopMessage::CheckWorkspace).unwrap();
         let mut revision = 0usize;
 
-        for message in &self.receiver {
+        while let Ok(message) = self.receiver.recv() {
             tracing::trace!("Main Loop: Tick");
 
             match message {
@@ -224,6 +228,7 @@ impl MainLoop {
                     revision += 1;
                     // Automatically cancels any pending queries and waits for them to complete.
                     db.apply_changes(changes);
+                    self.update_watched_folders(db);
                     self.sender.send(MainLoopMessage::CheckWorkspace).unwrap();
                 }
                 MainLoopMessage::Exit => {
@@ -231,6 +236,46 @@ impl MainLoop {
                 }
             }
         }
+    }
+
+    fn update_watched_folders(&mut self, db: &RootDatabase) {
+        let Some(watcher) = &mut self.watcher else {
+            return;
+        };
+
+        let new_watch_paths = db.workspace().watch_paths(db);
+
+        let mut added_folders = new_watch_paths.difference(&self.watch_paths).peekable();
+        let mut removed_folders = self.watch_paths.difference(&new_watch_paths).peekable();
+
+        if added_folders.peek().is_none() && removed_folders.peek().is_none() {
+            return;
+        }
+
+        for added_folder in added_folders {
+            // TODO How to surface errors here? Just use logging?
+            // There's really not much we can do about it and aborting seems kind of bad as well.
+            // TOOD: Consider storing a cache_key over all search paths that is used to determine if they've changed.
+            //  OR store both the supposed watch paths and the registered watch paths.
+            if let Err(error) = watcher.watch(&added_folder) {
+                // We'll pretend that setting up the new folders was successful to avoid that we'll try to
+                // set up the same folder over-and-over again which is likely to fail again.
+                tracing::error!("Failed to watch path {:?}: {:?}", added_folder, error);
+            }
+        }
+
+        for removed_path in removed_folders {
+            if let Err(error) = watcher.unwatch(removed_path) {
+                // This doesn't feel worth raising and could be a concequence of having failed to
+                // register the path before.
+                tracing::info!("Failed to unwatch path {:?}: {:?}", removed_path, error);
+            }
+            watcher.unwatch(removed_path).unwrap();
+        }
+
+        info!("Watching paths {:?}", new_watch_paths);
+
+        self.watch_paths = new_watch_paths;
     }
 
     #[allow(clippy::print_stderr, clippy::unused_self)]
