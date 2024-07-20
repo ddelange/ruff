@@ -1,11 +1,10 @@
-use std::borrow::Cow;
-use std::path::Path;
-
-use rustc_hash::FxHashMap;
-
+use ruff_allocator::{Allocator, CloneIn};
 use ruff_python_trivia::{indentation_at_offset, CommentRanges, SimpleTokenKind, SimpleTokenizer};
 use ruff_source_file::Locator;
 use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
+use rustc_hash::FxHashMap;
+use std::borrow::Cow;
+use std::path::Path;
 
 use crate::name::{Name, QualifiedName, QualifiedNameBuilder};
 use crate::parenthesize::parenthesized_range;
@@ -58,7 +57,7 @@ where
             // Ex) `list()`
             if arguments.is_empty() {
                 if let Expr::Name(ast::ExprName { id, .. }) = func.as_ref() {
-                    if !is_iterable_initializer(id.as_str(), |id| is_builtin(id)) {
+                    if !is_iterable_initializer(id, |id| is_builtin(id)) {
                         return true;
                     }
                     return false;
@@ -624,7 +623,9 @@ pub const fn is_mutable_iterable_initializer(expr: &Expr) -> bool {
 }
 
 /// Extract the names of all handled exceptions.
-pub fn extract_handled_exceptions(handlers: &[ExceptHandler]) -> Vec<&Expr> {
+pub fn extract_handled_exceptions<'a, 'ast>(
+    handlers: &'a [ExceptHandler<'ast>],
+) -> Vec<&'a Expr<'ast>> {
     let mut handled_exceptions = Vec::new();
     for handler in handlers {
         match handler {
@@ -647,7 +648,7 @@ pub fn extract_handled_exceptions(handlers: &[ExceptHandler]) -> Vec<&Expr> {
 /// Given an [`Expr`] that can be callable or not (like a decorator, which could
 /// be used with or without explicit call syntax), return the underlying
 /// callable.
-pub fn map_callable(decorator: &Expr) -> &Expr {
+pub fn map_callable<'a, 'ast>(decorator: &'a Expr<'ast>) -> &'a Expr<'ast> {
     if let Expr::Call(ast::ExprCall { func, .. }) = decorator {
         // Ex) `@decorator()`
         func
@@ -659,7 +660,7 @@ pub fn map_callable(decorator: &Expr) -> &Expr {
 
 /// Given an [`Expr`] that can be a [`ExprSubscript`][ast::ExprSubscript] or not
 /// (like an annotation that may be generic or not), return the underlying expr.
-pub fn map_subscript(expr: &Expr) -> &Expr {
+pub fn map_subscript<'a, 'ast>(expr: &'a Expr<'ast>) -> &'a Expr<'ast> {
     if let Expr::Subscript(ast::ExprSubscript { value, .. }) = expr {
         // Ex) `Iterable[T]`  => return `Iterable`
         value
@@ -670,7 +671,7 @@ pub fn map_subscript(expr: &Expr) -> &Expr {
 }
 
 /// Given an [`Expr`] that can be starred, return the underlying starred expression.
-pub fn map_starred(expr: &Expr) -> &Expr {
+pub fn map_starred<'a, 'ast>(expr: &'a Expr<'ast>) -> &'a Expr<'ast> {
     if let Expr::Starred(ast::ExprStarred { value, .. }) = expr {
         // Ex) `*args`
         value
@@ -690,8 +691,8 @@ where
     any_over_body(body, &|expr| {
         if let Expr::Call(ast::ExprCall { func, .. }) = expr {
             if let Expr::Name(ast::ExprName { id, .. }) = func.as_ref() {
-                if matches!(id.as_str(), "locals" | "globals" | "vars" | "exec" | "eval") {
-                    if is_builtin(id.as_str()) {
+                if matches!(*id, "locals" | "globals" | "vars" | "exec" | "eval") {
+                    if is_builtin(id) {
                         return true;
                     }
                 }
@@ -877,10 +878,10 @@ pub fn resolve_imported_module_path<'a>(
 #[derive(Debug, Default)]
 pub struct NameFinder<'a> {
     /// A map from identifier to defining expression.
-    pub names: FxHashMap<&'a str, &'a ast::ExprName>,
+    pub names: FxHashMap<&'a str, &'a ast::ExprName<'a>>,
 }
 
-impl<'a> Visitor<'a> for NameFinder<'a> {
+impl<'a> Visitor<'a, '_> for NameFinder<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         if let Expr::Name(name) = expr {
             self.names.insert(&name.id, name);
@@ -893,10 +894,10 @@ impl<'a> Visitor<'a> for NameFinder<'a> {
 #[derive(Debug, Default)]
 pub struct StoredNameFinder<'a> {
     /// A map from identifier to defining expression.
-    pub names: FxHashMap<&'a str, &'a ast::ExprName>,
+    pub names: FxHashMap<&'a str, &'a ast::ExprName<'a>>,
 }
 
-impl<'a> Visitor<'a> for StoredNameFinder<'a> {
+impl<'a> Visitor<'a, '_> for StoredNameFinder<'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         if let Expr::Name(name) = expr {
             if name.ctx.is_store() {
@@ -910,11 +911,11 @@ impl<'a> Visitor<'a> for StoredNameFinder<'a> {
 /// A [`Visitor`] that collects all `return` statements in a function or method.
 #[derive(Default)]
 pub struct ReturnStatementVisitor<'a> {
-    pub returns: Vec<&'a ast::StmtReturn>,
+    pub returns: Vec<&'a ast::StmtReturn<'a>>,
     pub is_generator: bool,
 }
 
-impl<'a> Visitor<'a> for ReturnStatementVisitor<'a> {
+impl<'a> Visitor<'a, '_> for ReturnStatementVisitor<'a> {
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
         match stmt {
             Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {
@@ -937,7 +938,7 @@ impl<'a> Visitor<'a> for ReturnStatementVisitor<'a> {
 /// A [`StatementVisitor`] that collects all `raise` statements in a function or method.
 #[derive(Default)]
 pub struct RaiseStatementVisitor<'a> {
-    pub raises: Vec<(TextRange, Option<&'a Expr>, Option<&'a Expr>)>,
+    pub raises: Vec<(TextRange, Option<&'a Expr<'a>>, Option<&'a Expr<'a>>)>,
 }
 
 impl<'a> StatementVisitor<'a> for RaiseStatementVisitor<'a> {
@@ -983,7 +984,7 @@ pub struct AwaitVisitor {
     pub seen_await: bool,
 }
 
-impl Visitor<'_> for AwaitVisitor {
+impl Visitor<'_, '_> for AwaitVisitor {
     fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::FunctionDef(_) | Stmt::ClassDef(_) => (),
@@ -1016,7 +1017,7 @@ pub fn is_docstring_stmt(stmt: &Stmt) -> bool {
 }
 
 /// Check if a node is part of a conditional branch.
-pub fn on_conditional_branch<'a>(parents: &mut impl Iterator<Item = &'a Stmt>) -> bool {
+pub fn on_conditional_branch<'a>(parents: &mut impl Iterator<Item = &'a Stmt<'a>>) -> bool {
     parents.any(|parent| {
         if matches!(parent, Stmt::If(_) | Stmt::While(_) | Stmt::Match(_)) {
             return true;
@@ -1031,7 +1032,7 @@ pub fn on_conditional_branch<'a>(parents: &mut impl Iterator<Item = &'a Stmt>) -
 }
 
 /// Check if a node is in a nested block.
-pub fn in_nested_block<'a>(mut parents: impl Iterator<Item = &'a Stmt>) -> bool {
+pub fn in_nested_block<'a>(mut parents: impl Iterator<Item = &'a Stmt<'a>>) -> bool {
     parents.any(|parent| {
         matches!(
             parent,
@@ -1196,7 +1197,7 @@ impl Truthiness {
                 func, arguments, ..
             }) => {
                 if let Expr::Name(ast::ExprName { id, .. }) = func.as_ref() {
-                    if is_iterable_initializer(id.as_str(), |id| is_builtin(id)) {
+                    if is_iterable_initializer(id, |id| is_builtin(id)) {
                         if arguments.is_empty() {
                             // Ex) `list()`
                             Self::Falsey
@@ -1372,18 +1373,22 @@ pub fn generate_comparison(
 }
 
 /// Format the expression as a PEP 604-style optional.
-pub fn pep_604_optional(expr: &Expr) -> Expr {
-    ast::ExprBinOp {
-        left: Box::new(expr.clone()),
-        op: Operator::BitOr,
-        right: Box::new(Expr::NoneLiteral(ast::ExprNoneLiteral::default())),
-        range: TextRange::default(),
-    }
-    .into()
+pub fn pep_604_optional<'a, 'ast>(expr: &'a Expr<'ast>, allocator: &'ast Allocator) -> Expr<'ast> {
+    allocator
+        .alloc(ast::ExprBinOp {
+            left: expr.clone_in(allocator),
+            op: Operator::BitOr,
+            right: Box::new_in(
+                Expr::NoneLiteral(ast::ExprNoneLiteral::default()),
+                allocator,
+            ),
+            range: TextRange::default(),
+        })
+        .into()
 }
 
 /// Format the expressions as a PEP 604-style union.
-pub fn pep_604_union(elts: &[Expr]) -> Expr {
+pub fn pep_604_union<'a, 'ast>(elts: &'a [Expr<'ast>], allocator: &'ast Allocator) -> Expr<'ast> {
     match elts {
         [] => Expr::Tuple(ast::ExprTuple {
             elts: vec![],
@@ -1392,11 +1397,11 @@ pub fn pep_604_union(elts: &[Expr]) -> Expr {
             parenthesized: true,
         }),
         [Expr::Tuple(ast::ExprTuple { elts, .. })] => pep_604_union(elts),
-        [elt] => elt.clone(),
+        [elt] => elt.clone_in(allocator),
         [rest @ .., elt] => Expr::BinOp(ast::ExprBinOp {
-            left: Box::new(pep_604_union(rest)),
+            left: Box::new_in(pep_604_union(rest, allocator)),
             op: Operator::BitOr,
-            right: Box::new(pep_604_union(&[elt.clone()])),
+            right: Box::new(pep_604_union(&[elt.clone_in(allocator)])),
             range: TextRange::default(),
         }),
     }
@@ -1417,8 +1422,16 @@ pub fn typing_optional(elt: Expr, binding: Name) -> Expr {
 }
 
 /// Format the expressions as a `typing.Union`-style union.
-pub fn typing_union(elts: &[Expr], binding: Name) -> Expr {
-    fn tuple(elts: &[Expr], binding: Name) -> Expr {
+pub fn typing_union<'a, 'ast>(
+    elts: &'a [Expr<'ast>],
+    binding: Name,
+    allocator: &'ast Allocator,
+) -> Expr<'ast> {
+    fn tuple<'a, 'ast>(
+        elts: &'a [Expr<'ast>],
+        binding: Name,
+        allocator: &'a Allocator,
+    ) -> Expr<'ast> {
         match elts {
             [] => Expr::Tuple(ast::ExprTuple {
                 elts: vec![],
@@ -1427,11 +1440,11 @@ pub fn typing_union(elts: &[Expr], binding: Name) -> Expr {
                 parenthesized: true,
             }),
             [Expr::Tuple(ast::ExprTuple { elts, .. })] => typing_union(elts, binding),
-            [elt] => elt.clone(),
+            [elt] => elt.clone_in(allocator),
             [rest @ .., elt] => Expr::BinOp(ast::ExprBinOp {
-                left: Box::new(tuple(rest, binding)),
+                left: Box::new_in(tuple(rest, binding), allocator),
                 op: Operator::BitOr,
-                right: Box::new(elt.clone()),
+                right: Box::new_in(elt.clone(), allocator),
                 range: TextRange::default(),
             }),
         }

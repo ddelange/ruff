@@ -2043,6 +2043,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruff_allocator"
+version = "0.0.0"
+dependencies = [
+ "bumpalo",
+]
+
+[[package]]
 name = "ruff_benchmark"
 version = "0.0.0"
 dependencies = [
@@ -2275,6 +2282,7 @@ dependencies = [
  "is-macro",
  "itertools 0.13.0",
  "once_cell",
+ "ruff_allocator",
  "ruff_cache",
  "ruff_macros",
  "ruff_python_trivia",
@@ -2368,6 +2376,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.6.0",
  "bstr",
+ "bumpalo",
  "compact_str",
  "insta",
  "memchr",

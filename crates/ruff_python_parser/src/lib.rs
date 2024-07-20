@@ -234,9 +234,10 @@ pub fn parse_unchecked_source(source: &str, source_type: PySourceType) -> Parsed
 }
 
 /// Represents the parsed source code.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug)]
 pub struct Parsed<T> {
     syntax: T,
+    allocator: std::sync::Mutex<bumpalo::Bump>,
     tokens: Tokens,
     errors: Vec<ParseError>,
 }
@@ -293,6 +294,15 @@ impl<T> Parsed<T> {
     }
 }
 
+impl<T> PartialEq for Parsed<T>
+where
+    T: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.syntax == other.syntax && self.tokens == other.tokens && self.errors == other.errors
+    }
+}
+
 impl Parsed<Mod> {
     /// Attempts to convert the [`Parsed<Mod>`] into a [`Parsed<ModModule>`].
     ///
@@ -307,6 +317,7 @@ impl Parsed<Mod> {
                 syntax: module,
                 tokens: self.tokens,
                 errors: self.errors,
+                allocator: self.allocator,
             }),
             Mod::Expression(_) => None,
         }
@@ -326,6 +337,7 @@ impl Parsed<Mod> {
                 syntax: expression,
                 tokens: self.tokens,
                 errors: self.errors,
+                allocator: self.allocator,
             }),
         }
     }

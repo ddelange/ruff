@@ -47,6 +47,8 @@ pub(crate) struct Parser<'src> {
 
     /// The start offset in the source code from which to start parsing at.
     start_offset: TextSize,
+
+    allocator: bumpalo::Bump,
 }
 
 impl<'src> Parser<'src> {
@@ -68,6 +70,7 @@ impl<'src> Parser<'src> {
             prev_token_end: TextSize::new(0),
             start_offset,
             current_token_id: TokenId::default(),
+            allocator: bumpalo::Bump::new(),
         }
     }
 
@@ -157,6 +160,7 @@ impl<'src> Parser<'src> {
                 syntax,
                 tokens: Tokens::new(tokens),
                 errors: parse_errors,
+                allocator: std::sync::Mutex::new(self.allocator),
             };
         }
 
@@ -188,6 +192,7 @@ impl<'src> Parser<'src> {
             syntax,
             tokens: Tokens::new(tokens),
             errors: merged,
+            allocator: std::sync::Mutex::new(self.allocator),
         }
     }
 
