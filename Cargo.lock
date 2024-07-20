@@ -2702,7 +2702,7 @@ checksum = "e86697c916019a8588c99b5fac3cead74ec0b4b819707a682fd4d23fa0ce1ba1"
 [[package]]
 name = "salsa"
 version = "0.18.0"
-source = "git+https://github.com/MichaReiser/salsa.git?rev=87aec971769175911fd16ae6d88620c47b13cb46#87aec971769175911fd16ae6d88620c47b13cb46"
+source = "git+https://github.com/MichaReiser/salsa.git?rev=3f37f0e9b8c3e38a319e160843966d1c2c949b1b#3f37f0e9b8c3e38a319e160843966d1c2c949b1b"
 dependencies = [
  "arc-swap",
  "boomphf",
@@ -2722,12 +2722,12 @@ dependencies = [
 [[package]]
 name = "salsa-macro-rules"
 version = "0.1.0"
-source = "git+https://github.com/MichaReiser/salsa.git?rev=87aec971769175911fd16ae6d88620c47b13cb46#87aec971769175911fd16ae6d88620c47b13cb46"
+source = "git+https://github.com/MichaReiser/salsa.git?rev=3f37f0e9b8c3e38a319e160843966d1c2c949b1b#3f37f0e9b8c3e38a319e160843966d1c2c949b1b"
 
 [[package]]
 name = "salsa-macros"
 version = "0.18.0"
-source = "git+https://github.com/MichaReiser/salsa.git?rev=87aec971769175911fd16ae6d88620c47b13cb46#87aec971769175911fd16ae6d88620c47b13cb46"
+source = "git+https://github.com/MichaReiser/salsa.git?rev=3f37f0e9b8c3e38a319e160843966d1c2c949b1b#3f37f0e9b8c3e38a319e160843966d1c2c949b1b"
 dependencies = [
  "heck",
  "proc-macro2",
