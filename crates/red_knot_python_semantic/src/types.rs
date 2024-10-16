@@ -60,7 +60,7 @@ fn symbol_ty_by_id<'db>(db: &'db dyn Db, scope: ScopeId<'db>, symbol: ScopedSymb
                 use_def.public_bindings(symbol),
                 use_def
                     .public_may_be_unbound(symbol)
-                    .then_some(Type::Unknown),
+                    .then_some(Type::Unbound),
             ))
         } else {
             None
@@ -79,7 +79,7 @@ fn symbol_ty_by_id<'db>(db: &'db dyn Db, scope: ScopeId<'db>, symbol: ScopedSymb
     }
 }
 
-/// Shorthand for `symbol_ty` that takes a symbol name instead of an ID.
+/// Shorthand for `symbol_ty_by_id` that takes a symbol name instead of an ID.
 fn symbol_ty<'db>(db: &'db dyn Db, scope: ScopeId<'db>, name: &str) -> Type<'db> {
     let table = symbol_table(db, scope);
     table
@@ -381,7 +381,7 @@ impl<'db> Type<'db> {
             Type::Union(union) => {
                 union.map(db, |element| element.replace_unbound_with(db, replacement))
             }
-            ty => *ty,
+            _ => *self,
         }
     }
 
@@ -444,6 +444,9 @@ impl<'db> Type<'db> {
     ///
     /// [assignable to]: https://typing.readthedocs.io/en/latest/spec/concepts.html#the-assignable-to-or-consistent-subtyping-relation
     pub(crate) fn is_assignable_to(self, db: &'db dyn Db, target: Type<'db>) -> bool {
+        if self.is_equivalent_to(db, target) {
+            return true;
+        }
         match (self, target) {
             (Type::Unknown | Type::Any | Type::Todo, _) => true,
             (_, Type::Unknown | Type::Any | Type::Todo) => true,
@@ -467,7 +470,7 @@ impl<'db> Type<'db> {
     ///
     /// Note: This function aims to have no false positives, but might return `false`
     /// for more complicated types that are actually singletons.
-    pub(crate) fn is_singleton(self, db: &'db dyn Db) -> bool {
+    pub(crate) fn is_singleton(self) -> bool {
         match self {
             Type::Any
             | Type::Never
@@ -485,14 +488,13 @@ impl<'db> Type<'db> {
                 false
             }
             Type::None | Type::BooleanLiteral(_) | Type::Function(..) | Type::Class(..) | Type::Module(..) => true,
-            Type::Tuple(tuple) => {
-                // We deliberately deviate from the language specification [1] here and claim
-                // that the empty tuple type is a singleton type. The reasoning is that `()`
-                // is often used as a sentinel value in user code. Declaring the empty tuple to
-                // be of singleton type allows us to narrow types in `is not ()` conditionals.
-                //
-                // [1] https://docs.python.org/3/reference/expressions.html#parenthesized-forms
-                tuple.elements(db).is_empty()
+            Type::Tuple(..) => {
+                // The empty tuple is a singleton on CPython and PyPy, but not on other Python
+                // implementations such as GraalPy. Its *use* as a singleton is discouraged and
+                // should not be relied on for type narrowing, so we do not treat it as one.
+                // See:
+                // https://docs.python.org/3/reference/expressions.html#parenthesized-forms
+                false
             }
             Type::Union(..) => {
                 // A single-element union, where the sole element was a singleton, would itself
@@ -501,13 +503,12 @@ impl<'db> Type<'db> {
                 false
             }
             Type::Intersection(..) => {
-                // Intersection types are hard to analyze. The following types are technically
-                // all singleton types, but it is not straightforward to compute this. Again,
-                // we simply return false.
+                // Here, we assume that all intersection types that are singletons would have
+                // been reduced to a different form via [`IntersectionBuilder::build`] by now.
+                // For example:
                 //
-                //   bool & ~Literal[False]`
-                //   None & (None | int)
-                //   (A | B) & (B | C)          with A, B, C disjunct and B a singleton
+                //   bool & ~Literal[False]   = Literal[True]
+                //   None & (None | int)      = None | None & int = None
                 //
                 false
             }
@@ -1428,7 +1429,8 @@ impl<'db> ClassType<'db> {
     pub fn class_member(self, db: &'db dyn Db, name: &str) -> Type<'db> {
         let member = self.own_class_member(db, name);
         if !member.is_unbound() {
-            return member;
+            // TODO diagnostic if maybe unbound?
+            return member.replace_unbound_with(db, Type::Never);
         }
 
         self.inherited_class_member(db, name)
@@ -1627,6 +1629,7 @@ mod tests {
     #[test_case(Ty::BytesLiteral("foo"), Ty::BuiltinInstance("bytes"))]
     #[test_case(Ty::IntLiteral(1), Ty::Union(vec![Ty::BuiltinInstance("int"), Ty::BuiltinInstance("str")]))]
     #[test_case(Ty::IntLiteral(1), Ty::Union(vec![Ty::Unknown, Ty::BuiltinInstance("str")]))]
+    #[test_case(Ty::Union(vec![Ty::IntLiteral(1), Ty::IntLiteral(2)]), Ty::Union(vec![Ty::IntLiteral(1), Ty::IntLiteral(2)]))]
     fn is_assignable_to(from: Ty, to: Ty) {
         let db = setup_db();
         assert!(from.into_type(&db).is_assignable_to(&db, to.into_type(&db)));
@@ -1682,23 +1685,23 @@ mod tests {
     #[test_case(Ty::None)]
     #[test_case(Ty::BoolLiteral(true))]
     #[test_case(Ty::BoolLiteral(false))]
-    #[test_case(Ty::Tuple(vec![]))]
     fn is_singleton(from: Ty) {
         let db = setup_db();
 
-        assert!(from.into_type(&db).is_singleton(&db));
+        assert!(from.into_type(&db).is_singleton());
     }
 
     #[test_case(Ty::Never)]
     #[test_case(Ty::IntLiteral(345))]
     #[test_case(Ty::BuiltinInstance("str"))]
     #[test_case(Ty::Union(vec![Ty::IntLiteral(1), Ty::IntLiteral(2)]))]
+    #[test_case(Ty::Tuple(vec![]))]
     #[test_case(Ty::Tuple(vec![Ty::None]))]
     #[test_case(Ty::Tuple(vec![Ty::None, Ty::BoolLiteral(true)]))]
     fn is_not_singleton(from: Ty) {
         let db = setup_db();
 
-        assert!(!from.into_type(&db).is_singleton(&db));
+        assert!(!from.into_type(&db).is_singleton());
     }
 
     #[test_case(Ty::IntLiteral(1); "is_int_literal_truthy")]
