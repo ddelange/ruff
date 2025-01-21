@@ -34,7 +34,7 @@ impl<'db> Mro<'db> {
     pub(super) fn from_error(db: &'db dyn Db, class: Class<'db>) -> Self {
         Self::from([
             ClassBase::Class(class),
-            ClassBase::Unknown,
+            ClassBase::unknown(),
             ClassBase::object(db),
         ])
     }
@@ -42,7 +42,7 @@ impl<'db> Mro<'db> {
     fn of_class_impl(db: &'db dyn Db, class: Class<'db>) -> Result<Self, MroErrorKind<'db>> {
         let class_bases = class.explicit_bases(db);
 
-        if !class_bases.is_empty() && class.is_cyclically_defined(db) {
+        if !class_bases.is_empty() && class.inheritance_cycle(db).is_some() {
             // We emit errors for cyclically defined classes elsewhere.
             // It's important that we don't even try to infer the MRO for a cyclically defined class,
             // or we'll end up in an infinite loop.

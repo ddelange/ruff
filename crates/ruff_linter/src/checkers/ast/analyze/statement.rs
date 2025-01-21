@@ -309,21 +309,7 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
                     body,
                 );
             }
-            // In preview mode, calls are analyzed. To avoid duplicate diagnostics,
-            // skip analyzing the decorators.
-            if !checker.settings.preview.is_enabled()
-                && checker.any_enabled(&[
-                    Rule::PytestParametrizeNamesWrongType,
-                    Rule::PytestParametrizeValuesWrongType,
-                    Rule::PytestDuplicateParametrizeTestCases,
-                ])
-            {
-                for decorator in decorator_list {
-                    if let Some(call) = decorator.expression.as_call_expr() {
-                        flake8_pytest_style::rules::parametrize(checker, call);
-                    }
-                }
-            }
+
             if checker.any_enabled(&[
                 Rule::PytestIncorrectMarkParenthesesStyle,
                 Rule::PytestUseFixturesWithoutParameters,
@@ -387,6 +373,9 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
             if checker.enabled(Rule::PostInitDefault) {
                 ruff::rules::post_init_default(checker, function_def);
             }
+            if checker.enabled(Rule::PytestParameterWithDefaultArgument) {
+                flake8_pytest_style::rules::parameter_with_default_argument(checker, function_def);
+            }
         }
         Stmt::Return(_) => {
             if checker.enabled(Rule::ReturnOutsideFunction) {
@@ -434,6 +423,9 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
             }
             if checker.enabled(Rule::ClassAsDataStructure) {
                 flake8_bugbear::rules::class_as_data_structure(checker, class_def);
+            }
+            if checker.enabled(Rule::RedefinedSlotsInSubclass) {
+                pylint::rules::redefined_slots_in_subclass(checker, class_def);
             }
             if checker.enabled(Rule::TooManyPublicMethods) {
                 pylint::rules::too_many_public_methods(
@@ -1213,42 +1205,43 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
                 }
             }
             if checker.any_enabled(&[Rule::BadVersionInfoComparison, Rule::BadVersionInfoOrder]) {
-                if checker.source_type.is_stub() || checker.settings.preview.is_enabled() {
-                    fn bad_version_info_comparison(
-                        checker: &mut Checker,
-                        test: &Expr,
-                        has_else_clause: bool,
-                    ) {
-                        if let Expr::BoolOp(ast::ExprBoolOp { values, .. }) = test {
-                            for value in values {
-                                flake8_pyi::rules::bad_version_info_comparison(
-                                    checker,
-                                    value,
-                                    has_else_clause,
-                                );
-                            }
-                        } else {
+                fn bad_version_info_comparison(
+                    checker: &mut Checker,
+                    test: &Expr,
+                    has_else_clause: bool,
+                ) {
+                    if let Expr::BoolOp(ast::ExprBoolOp { values, .. }) = test {
+                        for value in values {
                             flake8_pyi::rules::bad_version_info_comparison(
                                 checker,
-                                test,
+                                value,
                                 has_else_clause,
                             );
                         }
+                    } else {
+                        flake8_pyi::rules::bad_version_info_comparison(
+                            checker,
+                            test,
+                            has_else_clause,
+                        );
                     }
+                }
 
-                    let has_else_clause =
-                        elif_else_clauses.iter().any(|clause| clause.test.is_none());
+                let has_else_clause = elif_else_clauses.iter().any(|clause| clause.test.is_none());
 
-                    bad_version_info_comparison(checker, test.as_ref(), has_else_clause);
-                    for clause in elif_else_clauses {
-                        if let Some(test) = clause.test.as_ref() {
-                            bad_version_info_comparison(checker, test, has_else_clause);
-                        }
+                bad_version_info_comparison(checker, test.as_ref(), has_else_clause);
+                for clause in elif_else_clauses {
+                    if let Some(test) = clause.test.as_ref() {
+                        bad_version_info_comparison(checker, test, has_else_clause);
                     }
                 }
             }
+
             if checker.enabled(Rule::IfKeyInDictDel) {
                 ruff::rules::if_key_in_dict_del(checker, if_);
+            }
+            if checker.enabled(Rule::NeedlessElse) {
+                ruff::rules::needless_else(checker, if_.into());
             }
         }
         Stmt::Assert(
@@ -1312,6 +1305,9 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
             if checker.enabled(Rule::PytestRaisesWithMultipleStatements) {
                 flake8_pytest_style::rules::complex_raises(checker, stmt, items, body);
             }
+            if checker.enabled(Rule::PytestWarnsWithMultipleStatements) {
+                flake8_pytest_style::rules::complex_warns(checker, stmt, items, body);
+            }
             if checker.enabled(Rule::MultipleWithStatements) {
                 flake8_simplify::rules::multiple_with_statements(
                     checker,
@@ -1355,6 +1351,9 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
             }
             if checker.enabled(Rule::AsyncBusyWait) {
                 flake8_async::rules::async_busy_wait(checker, while_stmt);
+            }
+            if checker.enabled(Rule::NeedlessElse) {
+                ruff::rules::needless_else(checker, while_stmt.into());
             }
         }
         Stmt::For(
@@ -1441,15 +1440,23 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
                 if checker.enabled(Rule::ForLoopSetMutations) {
                     refurb::rules::for_loop_set_mutations(checker, for_stmt);
                 }
+                if checker.enabled(Rule::ForLoopWrites) {
+                    refurb::rules::for_loop_writes(checker, for_stmt);
+                }
+            }
+            if checker.enabled(Rule::NeedlessElse) {
+                ruff::rules::needless_else(checker, for_stmt.into());
             }
         }
-        Stmt::Try(ast::StmtTry {
-            body,
-            handlers,
-            orelse,
-            finalbody,
-            ..
-        }) => {
+        Stmt::Try(
+            try_stmt @ ast::StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            },
+        ) => {
             if checker.enabled(Rule::TooManyNestedBlocks) {
                 pylint::rules::too_many_nested_blocks(checker, stmt);
             }
@@ -1515,6 +1522,9 @@ pub(crate) fn statement(stmt: &Stmt, checker: &mut Checker) {
             }
             if checker.enabled(Rule::ErrorInsteadOfException) {
                 tryceratops::rules::error_instead_of_exception(checker, handlers);
+            }
+            if checker.enabled(Rule::NeedlessElse) {
+                ruff::rules::needless_else(checker, try_stmt.into());
             }
         }
         Stmt::Assign(assign @ ast::StmtAssign { targets, value, .. }) => {

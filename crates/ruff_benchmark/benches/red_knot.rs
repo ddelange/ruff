@@ -1,11 +1,10 @@
 #![allow(clippy::disallowed_names)]
 
 use rayon::ThreadPoolBuilder;
+use red_knot_project::metadata::options::{EnvironmentOptions, Options};
+use red_knot_project::watch::{ChangeEvent, ChangedKind};
+use red_knot_project::{Db, ProjectDatabase, ProjectMetadata};
 use red_knot_python_semantic::PythonVersion;
-use red_knot_workspace::db::{Db, RootDatabase};
-use red_knot_workspace::watch::{ChangeEvent, ChangedKind};
-use red_knot_workspace::workspace::settings::Configuration;
-use red_knot_workspace::workspace::WorkspaceMetadata;
 use ruff_benchmark::criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use ruff_benchmark::TestFile;
 use ruff_db::diagnostic::Diagnostic;
@@ -15,7 +14,7 @@ use ruff_db::system::{MemoryFileSystem, SystemPath, SystemPathBuf, TestSystem};
 use rustc_hash::FxHashSet;
 
 struct Case {
-    db: RootDatabase,
+    db: ProjectDatabase,
     fs: MemoryFileSystem,
     re: File,
     re_path: SystemPathBuf,
@@ -74,23 +73,22 @@ fn setup_case() -> Case {
     .unwrap();
 
     let src_root = SystemPath::new("/src");
-    let metadata = WorkspaceMetadata::discover(
-        src_root,
-        &system,
-        Some(&Configuration {
+    let mut metadata = ProjectMetadata::discover(src_root, &system).unwrap();
+    metadata.apply_cli_options(Options {
+        environment: Some(EnvironmentOptions {
             python_version: Some(PythonVersion::PY312),
-            ..Configuration::default()
+            ..EnvironmentOptions::default()
         }),
-    )
-    .unwrap();
+        ..Options::default()
+    });
 
-    let mut db = RootDatabase::new(metadata, system).unwrap();
+    let mut db = ProjectDatabase::new(metadata, system).unwrap();
 
     let tomllib_files: FxHashSet<File> = tomllib_filenames
         .iter()
         .map(|filename| system_path_to_file(&db, tomllib_path(filename)).unwrap())
         .collect();
-    db.workspace().set_open_files(&mut db, tomllib_files);
+    db.project().set_open_files(&mut db, tomllib_files);
 
     let re_path = tomllib_path("_re.py");
     let re = system_path_to_file(&db, &re_path).unwrap();

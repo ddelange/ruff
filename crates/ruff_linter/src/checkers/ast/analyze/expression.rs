@@ -230,6 +230,31 @@ pub(crate) fn expression(expr: &Expr, checker: &mut Checker) {
                     if checker.enabled(Rule::Airflow3MovedToProvider) {
                         airflow::rules::moved_to_provider_in_3(checker, expr);
                     }
+                    if checker.any_enabled(&[
+                        Rule::SuspiciousPickleUsage,
+                        Rule::SuspiciousMarshalUsage,
+                        Rule::SuspiciousInsecureHashUsage,
+                        Rule::SuspiciousInsecureCipherUsage,
+                        Rule::SuspiciousInsecureCipherModeUsage,
+                        Rule::SuspiciousMktempUsage,
+                        Rule::SuspiciousEvalUsage,
+                        Rule::SuspiciousMarkSafeUsage,
+                        Rule::SuspiciousURLOpenUsage,
+                        Rule::SuspiciousNonCryptographicRandomUsage,
+                        Rule::SuspiciousTelnetUsage,
+                        Rule::SuspiciousXMLCElementTreeUsage,
+                        Rule::SuspiciousXMLElementTreeUsage,
+                        Rule::SuspiciousXMLExpatReaderUsage,
+                        Rule::SuspiciousXMLExpatBuilderUsage,
+                        Rule::SuspiciousXMLSaxUsage,
+                        Rule::SuspiciousXMLMiniDOMUsage,
+                        Rule::SuspiciousXMLPullDOMUsage,
+                        Rule::SuspiciousXMLETreeUsage,
+                        Rule::SuspiciousFTPLibUsage,
+                        Rule::SuspiciousUnverifiedContextUsage,
+                    ]) {
+                        flake8_bandit::rules::suspicious_function_reference(checker, expr);
+                    }
 
                     // Ex) List[...]
                     if checker.any_enabled(&[
@@ -315,6 +340,34 @@ pub(crate) fn expression(expr: &Expr, checker: &mut Checker) {
             }
         }
         Expr::Attribute(attribute) => {
+            if attribute.ctx == ExprContext::Load {
+                if checker.any_enabled(&[
+                    Rule::SuspiciousPickleUsage,
+                    Rule::SuspiciousMarshalUsage,
+                    Rule::SuspiciousInsecureHashUsage,
+                    Rule::SuspiciousInsecureCipherUsage,
+                    Rule::SuspiciousInsecureCipherModeUsage,
+                    Rule::SuspiciousMktempUsage,
+                    Rule::SuspiciousEvalUsage,
+                    Rule::SuspiciousMarkSafeUsage,
+                    Rule::SuspiciousURLOpenUsage,
+                    Rule::SuspiciousNonCryptographicRandomUsage,
+                    Rule::SuspiciousTelnetUsage,
+                    Rule::SuspiciousXMLCElementTreeUsage,
+                    Rule::SuspiciousXMLElementTreeUsage,
+                    Rule::SuspiciousXMLExpatReaderUsage,
+                    Rule::SuspiciousXMLExpatBuilderUsage,
+                    Rule::SuspiciousXMLSaxUsage,
+                    Rule::SuspiciousXMLMiniDOMUsage,
+                    Rule::SuspiciousXMLPullDOMUsage,
+                    Rule::SuspiciousXMLETreeUsage,
+                    Rule::SuspiciousFTPLibUsage,
+                    Rule::SuspiciousUnverifiedContextUsage,
+                ]) {
+                    flake8_bandit::rules::suspicious_function_reference(checker, expr);
+                }
+            }
+
             // Ex) typing.List[...]
             if checker.any_enabled(&[
                 Rule::FutureRewritableTypeAnnotation,
@@ -879,13 +932,11 @@ pub(crate) fn expression(expr: &Expr, checker: &mut Checker) {
                     checker.diagnostics.push(diagnostic);
                 }
             }
-            if checker.settings.preview.is_enabled()
-                && checker.any_enabled(&[
-                    Rule::PytestParametrizeNamesWrongType,
-                    Rule::PytestParametrizeValuesWrongType,
-                    Rule::PytestDuplicateParametrizeTestCases,
-                ])
-            {
+            if checker.any_enabled(&[
+                Rule::PytestParametrizeNamesWrongType,
+                Rule::PytestParametrizeValuesWrongType,
+                Rule::PytestDuplicateParametrizeTestCases,
+            ]) {
                 flake8_pytest_style::rules::parametrize(checker, call);
             }
             if checker.enabled(Rule::PytestUnittestAssertion) {
@@ -916,6 +967,9 @@ pub(crate) fn expression(expr: &Expr, checker: &mut Checker) {
                 Rule::PytestRaisesTooBroad,
             ]) {
                 flake8_pytest_style::rules::raises_call(checker, call);
+            }
+            if checker.any_enabled(&[Rule::PytestWarnsWithoutWarning, Rule::PytestWarnsTooBroad]) {
+                flake8_pytest_style::rules::warns_call(checker, call);
             }
             if checker.enabled(Rule::PytestFailWithoutMessage) {
                 flake8_pytest_style::rules::fail_call(checker, call);
@@ -976,6 +1030,7 @@ pub(crate) fn expression(expr: &Expr, checker: &mut Checker) {
                 Rule::OsPathIsabs,
                 Rule::OsPathJoin,
                 Rule::OsPathBasename,
+                Rule::OsPathDirname,
                 Rule::OsPathSamefile,
                 Rule::OsPathSplitext,
                 Rule::BuiltinOpen,
@@ -1123,6 +1178,9 @@ pub(crate) fn expression(expr: &Expr, checker: &mut Checker) {
             }
             if checker.enabled(Rule::UnnecessaryEmptyIterableWithinDequeCall) {
                 ruff::rules::unnecessary_literal_within_deque_call(checker, call);
+            }
+            if checker.enabled(Rule::StarmapZip) {
+                ruff::rules::starmap_zip(checker, call);
             }
         }
         Expr::Dict(dict) => {
