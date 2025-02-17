@@ -1,5 +1,4 @@
 use super::context::InferContext;
-use crate::declare_lint;
 use crate::lint::{Level, LintRegistryBuilder, LintStatus};
 use crate::suppression::FileSuppressionId;
 use crate::types::string_annotation::{
@@ -7,8 +6,9 @@ use crate::types::string_annotation::{
     IMPLICIT_CONCATENATED_STRING_TYPE_ANNOTATION, INVALID_SYNTAX_IN_FORWARD_ANNOTATION,
     RAW_STRING_TYPE_ANNOTATION,
 };
-use crate::types::{ClassLiteralType, Type};
-use ruff_db::diagnostic::{Diagnostic, DiagnosticId, Severity};
+use crate::types::{ClassLiteralType, KnownInstanceType, Type};
+use crate::{declare_lint, Db};
+use ruff_db::diagnostic::{Diagnostic, DiagnosticId, Severity, Span};
 use ruff_db::files::File;
 use ruff_python_ast::{self as ast, AnyNodeRef};
 use ruff_text_size::{Ranged, TextRange};
@@ -49,6 +49,7 @@ pub(crate) fn register_lints(registry: &mut LintRegistryBuilder) {
     registry.register_lint(&POSSIBLY_UNBOUND_IMPORT);
     registry.register_lint(&POSSIBLY_UNRESOLVED_REFERENCE);
     registry.register_lint(&SUBCLASS_OF_FINAL_CLASS);
+    registry.register_lint(&TYPE_ASSERTION_FAILURE);
     registry.register_lint(&TOO_MANY_POSITIONAL_ARGUMENTS);
     registry.register_lint(&UNDEFINED_REVEAL);
     registry.register_lint(&UNKNOWN_ARGUMENT);
@@ -58,6 +59,7 @@ pub(crate) fn register_lints(registry: &mut LintRegistryBuilder) {
     registry.register_lint(&UNSUPPORTED_OPERATOR);
     registry.register_lint(&ZERO_STEPSIZE_IN_SLICE);
     registry.register_lint(&STATIC_ASSERT_ERROR);
+    registry.register_lint(&INVALID_ATTRIBUTE_ACCESS);
 
     // String annotations
     registry.register_lint(&BYTE_STRING_TYPE_ANNOTATION);
@@ -577,6 +579,28 @@ declare_lint! {
 
 declare_lint! {
     /// ## What it does
+    /// Checks for `assert_type()` calls where the actual type
+    /// is not the same as the asserted type.
+    ///
+    /// ## Why is this bad?
+    /// `assert_type()` allows confirming the inferred type of a certain value.
+    ///
+    /// ## Example
+    ///
+    /// ```python
+    /// def _(x: int):
+    ///     assert_type(x, int)  # fine
+    ///     assert_type(x, str)  # error: Actual type does not match asserted type
+    /// ```
+    pub(crate) static TYPE_ASSERTION_FAILURE = {
+        summary: "detects failed type assertions",
+        status: LintStatus::preview("1.0.0"),
+        default_level: Level::Error,
+    }
+}
+
+declare_lint! {
+    /// ## What it does
     /// Checks for calls that pass more positional arguments than the callable can accept.
     ///
     /// ## Why is this bad?
@@ -727,6 +751,25 @@ declare_lint! {
     }
 }
 
+declare_lint! {
+    /// ## What it does
+    /// Makes sure that instance attribute accesses are valid.
+    ///
+    /// ## Examples
+    /// ```python
+    /// class C:
+    ///   var: ClassVar[int] = 1
+    ///
+    /// C.var = 3  # okay
+    /// C().var = 3  # error: Cannot assign to class variable
+    /// ```
+    pub(crate) static INVALID_ATTRIBUTE_ACCESS = {
+        summary: "Invalid attribute access",
+        status: LintStatus::preview("1.0.0"),
+        default_level: Level::Error,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct TypeCheckDiagnostic {
     pub(crate) id: DiagnosticId,
@@ -759,12 +802,8 @@ impl Diagnostic for TypeCheckDiagnostic {
         TypeCheckDiagnostic::message(self).into()
     }
 
-    fn file(&self) -> File {
-        TypeCheckDiagnostic::file(self)
-    }
-
-    fn range(&self) -> Option<TextRange> {
-        Some(Ranged::range(self))
+    fn span(&self) -> Option<Span> {
+        Some(Span::from(self.file).with_range(self.range))
     }
 
     fn severity(&self) -> Severity {
@@ -941,13 +980,13 @@ pub(super) fn report_slice_step_size_zero(context: &InferContext, node: AnyNodeR
     );
 }
 
-pub(super) fn report_invalid_assignment(
+fn report_invalid_assignment_with_message(
     context: &InferContext,
     node: AnyNodeRef,
-    declared_ty: Type,
-    assigned_ty: Type,
+    target_ty: Type,
+    message: std::fmt::Arguments,
 ) {
-    match declared_ty {
+    match target_ty {
         Type::ClassLiteral(ClassLiteralType { class }) => {
             context.report_lint(&INVALID_ASSIGNMENT, node, format_args!(
                     "Implicit shadowing of class `{}`; annotate to make it explicit if this is intentional",
@@ -959,17 +998,46 @@ pub(super) fn report_invalid_assignment(
                     function.name(context.db())));
         }
         _ => {
-            context.report_lint(
-                &INVALID_ASSIGNMENT,
-                node,
-                format_args!(
-                    "Object of type `{}` is not assignable to `{}`",
-                    assigned_ty.display(context.db()),
-                    declared_ty.display(context.db()),
-                ),
-            );
+            context.report_lint(&INVALID_ASSIGNMENT, node, message);
         }
     }
+}
+
+pub(super) fn report_invalid_assignment(
+    context: &InferContext,
+    node: AnyNodeRef,
+    target_ty: Type,
+    source_ty: Type,
+) {
+    report_invalid_assignment_with_message(
+        context,
+        node,
+        target_ty,
+        format_args!(
+            "Object of type `{}` is not assignable to `{}`",
+            source_ty.display(context.db()),
+            target_ty.display(context.db()),
+        ),
+    );
+}
+
+pub(super) fn report_invalid_attribute_assignment(
+    context: &InferContext,
+    node: AnyNodeRef,
+    target_ty: Type,
+    source_ty: Type,
+    attribute_name: &'_ str,
+) {
+    report_invalid_assignment_with_message(
+        context,
+        node,
+        target_ty,
+        format_args!(
+            "Object of type `{}` is not assignable to attribute `{attribute_name}` of type `{}`",
+            source_ty.display(context.db()),
+            target_ty.display(context.db()),
+        ),
+    );
 }
 
 pub(super) fn report_possibly_unresolved_reference(
@@ -1035,5 +1103,20 @@ pub(crate) fn report_base_with_incompatible_slots(context: &InferContext, node: 
         &INCOMPATIBLE_SLOTS,
         node.into(),
         format_args!("Class base has incompatible `__slots__`"),
+    );
+}
+
+pub(crate) fn report_invalid_arguments_to_annotated<'db>(
+    db: &'db dyn Db,
+    context: &InferContext<'db>,
+    subscript: &ast::ExprSubscript,
+) {
+    context.report_lint(
+        &INVALID_TYPE_FORM,
+        subscript.into(),
+        format_args!(
+            "Special form `{}` expected at least 2 arguments (one type and at least one metadata element)",
+            KnownInstanceType::Annotated.repr(db)
+        ),
     );
 }

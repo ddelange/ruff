@@ -4,14 +4,14 @@
 
 ```py
 class Multiplier:
-    def __init__(self, factor: float):
+    def __init__(self, factor: int):
         self.factor = factor
 
-    def __call__(self, number: float) -> float:
+    def __call__(self, number: int) -> int:
         return number * self.factor
 
-a = Multiplier(2.0)(3.0)
-reveal_type(a)  # revealed: float
+a = Multiplier(2)(3)
+reveal_type(a)  # revealed: int
 
 class Unit: ...
 
@@ -52,7 +52,7 @@ class NonCallable:
     __call__ = 1
 
 a = NonCallable()
-# error: "Object of type `NonCallable` is not callable"
+# error: "Object of type `Unknown | Literal[1]` is not callable (due to union element `Literal[1]`)"
 reveal_type(a())  # revealed: Unknown
 ```
 
@@ -69,4 +69,33 @@ def _(flag: bool):
     a = NonCallable()
     # error: "Object of type `Literal[1] | Literal[__call__]` is not callable (due to union element `Literal[1]`)"
     reveal_type(a())  # revealed: Unknown | int
+```
+
+## Call binding errors
+
+### Wrong argument type
+
+```py
+class C:
+    def __call__(self, x: int) -> int:
+        return 1
+
+c = C()
+
+# error: 15 [invalid-argument-type] "Object of type `Literal["foo"]` cannot be assigned to parameter 2 (`x`) of function `__call__`; expected type `int`"
+reveal_type(c("foo"))  # revealed: int
+```
+
+### Wrong argument type on `self`
+
+```py
+class C:
+    # TODO this definition should also be an error; `C` must be assignable to type of `self`
+    def __call__(self: int) -> int:
+        return 1
+
+c = C()
+
+# error: 13 [invalid-argument-type] "Object of type `C` cannot be assigned to parameter 1 (`self`) of function `__call__`; expected type `int`"
+reveal_type(c())  # revealed: int
 ```

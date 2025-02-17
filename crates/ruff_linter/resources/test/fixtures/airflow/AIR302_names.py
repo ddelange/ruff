@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from airflow import (
     PY36,
     PY37,
@@ -6,6 +8,8 @@ from airflow import (
     PY310,
     PY311,
     PY312,
+)
+from airflow import (
     Dataset as DatasetFromRoot,
 )
 from airflow.api_connexion.security import requires_access, requires_access_dataset
@@ -41,7 +45,6 @@ from airflow.lineage.hook import DatasetLineageInfo
 from airflow.listeners.spec.dataset import on_dataset_changed, on_dataset_created
 from airflow.metrics.validators import AllowListValidator, BlockListValidator
 from airflow.operators import dummy_operator
-from airflow.operators.bash_operator import BashOperator
 from airflow.operators.branch_operator import BaseBranchOperator
 from airflow.operators.dagrun_operator import TriggerDagRunLink, TriggerDagRunOperator
 from airflow.operators.dummy import DummyOperator, EmptyOperator
@@ -66,17 +69,14 @@ from airflow.providers.openlineage.utils.utils import (
 )
 from airflow.providers.postgres.datasets import postgres
 from airflow.providers.trino.datasets import trino
-from airflow.secrets.local_filesystem import get_connection, load_connections
+from airflow.secrets.local_filesystem import LocalFilesystemBackend, load_connections
 from airflow.security.permissions import RESOURCE_DATASET
 from airflow.sensors.base_sensor_operator import BaseSensorOperator
 from airflow.sensors.date_time_sensor import DateTimeSensor
-from airflow.sensors.external_task import (
-    ExternalTaskSensorLink as ExternalTaskSensorLinkFromExternalTask,
-)
 from airflow.sensors.external_task_sensor import (
     ExternalTaskMarker,
     ExternalTaskSensor,
-    ExternalTaskSensorLink as ExternalTaskSensorLinkFromExternalTaskSensor,
+    ExternalTaskSensorLink,
 )
 from airflow.sensors.time_delta_sensor import TimeDeltaSensor
 from airflow.timetables.datasets import DatasetOrTimeSchedule
@@ -84,6 +84,7 @@ from airflow.timetables.simple import DatasetTriggeredTimetable
 from airflow.triggers.external_task import TaskStateTrigger
 from airflow.utils import dates
 from airflow.utils.dag_cycle_tester import test_cycle
+from airflow.utils.dag_parsing_context import get_parsing_context
 from airflow.utils.dates import (
     date_range,
     datetime_to_nano,
@@ -163,9 +164,6 @@ AllowListValidator(), BlockListValidator()
 dummy_operator.EmptyOperator()
 dummy_operator.DummyOperator()
 
-# airflow.operators.bash_operator
-BashOperator()
-
 # airflow.operators.branch_operator
 BaseBranchOperator()
 
@@ -225,7 +223,10 @@ postgres.sanitize_uri
 trino.sanitize_uri
 
 # airflow.secrets
-get_connection, load_connections
+# get_connection
+lfb = LocalFilesystemBackend()
+lfb.get_connections()
+load_connections
 
 # airflow.security.permissions
 RESOURCE_DATASET
@@ -237,11 +238,13 @@ BaseSensorOperator()
 DateTimeSensor()
 
 # airflow.sensors.external_task
-ExternalTaskSensorLinkFromExternalTask()
-
-# airflow.sensors.external_task_sensor
+ExternalTaskSensorLink()
 ExternalTaskMarker()
 ExternalTaskSensor()
+
+# airflow.sensors.external_task_sensor
+ExternalTaskMarkerFromExternalTaskSensor()
+ExternalTaskSensorFromExternalTaskSensor()
 ExternalTaskSensorLinkFromExternalTaskSensor()
 
 # airflow.sensors.time_delta_sensor
@@ -271,6 +274,9 @@ dates.datetime_to_nano
 
 # airflow.utils.dag_cycle_tester
 test_cycle
+
+# airflow.utils.dag_parsing_context
+get_parsing_context
 
 # airflow.utils.decorators
 apply_defaults

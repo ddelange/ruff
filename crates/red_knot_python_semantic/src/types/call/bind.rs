@@ -5,7 +5,7 @@ use crate::types::diagnostic::{
     TOO_MANY_POSITIONAL_ARGUMENTS, UNKNOWN_ARGUMENT,
 };
 use crate::types::signatures::Parameter;
-use crate::types::UnionType;
+use crate::types::{todo_type, UnionType};
 use ruff_python_ast as ast;
 
 /// Bind a [`CallArguments`] against a callable [`Signature`].
@@ -16,7 +16,7 @@ pub(crate) fn bind_call<'db>(
     db: &'db dyn Db,
     arguments: &CallArguments<'_, 'db>,
     signature: &Signature<'db>,
-    callable_ty: Option<Type<'db>>,
+    callable_ty: Type<'db>,
 ) -> CallBinding<'db> {
     let parameters = signature.parameters();
     // The type assigned to each parameter at this call site.
@@ -24,9 +24,24 @@ pub(crate) fn bind_call<'db>(
     let mut errors = vec![];
     let mut next_positional = 0;
     let mut first_excess_positional = None;
+    let mut num_synthetic_args = 0;
+    let get_argument_index = |argument_index: usize, num_synthetic_args: usize| {
+        if argument_index >= num_synthetic_args {
+            // Adjust the argument index to skip synthetic args, which don't appear at the call
+            // site and thus won't be in the Call node arguments list.
+            Some(argument_index - num_synthetic_args)
+        } else {
+            // we are erroring on a synthetic argument, we'll just emit the diagnostic on the
+            // entire Call node, since there's no argument node for this argument at the call site
+            None
+        }
+    };
     for (argument_index, argument) in arguments.iter().enumerate() {
         let (index, parameter, argument_ty, positional) = match argument {
-            Argument::Positional(ty) => {
+            Argument::Positional(ty) | Argument::Synthetic(ty) => {
+                if matches!(argument, Argument::Synthetic(_)) {
+                    num_synthetic_args += 1;
+                }
                 let Some((index, parameter)) = parameters
                     .get_positional(next_positional)
                     .map(|param| (next_positional, param))
@@ -46,7 +61,7 @@ pub(crate) fn bind_call<'db>(
                 else {
                     errors.push(CallBindingError::UnknownArgument {
                         argument_name: ast::name::Name::new(name),
-                        argument_index,
+                        argument_index: get_argument_index(argument_index, num_synthetic_args),
                     });
                     continue;
                 };
@@ -58,23 +73,23 @@ pub(crate) fn bind_call<'db>(
                 continue;
             }
         };
-        if let Some(expected_ty) = parameter.annotated_ty() {
+        if let Some(expected_ty) = parameter.annotated_type() {
             if !argument_ty.is_assignable_to(db, expected_ty) {
                 errors.push(CallBindingError::InvalidArgumentType {
                     parameter: ParameterContext::new(parameter, index, positional),
-                    argument_index,
+                    argument_index: get_argument_index(argument_index, num_synthetic_args),
                     expected_ty,
                     provided_ty: *argument_ty,
                 });
             }
         }
         if let Some(existing) = parameter_tys[index].replace(*argument_ty) {
-            if parameter.is_variadic() {
+            if parameter.is_variadic() || parameter.is_keyword_variadic() {
                 let union = UnionType::from_elements(db, [existing, *argument_ty]);
                 parameter_tys[index].replace(union);
             } else {
                 errors.push(CallBindingError::ParameterAlreadyAssigned {
-                    argument_index,
+                    argument_index: get_argument_index(argument_index, num_synthetic_args),
                     parameter: ParameterContext::new(parameter, index, positional),
                 });
             }
@@ -82,7 +97,10 @@ pub(crate) fn bind_call<'db>(
     }
     if let Some(first_excess_argument_index) = first_excess_positional {
         errors.push(CallBindingError::TooManyPositionalArguments {
-            first_excess_argument_index,
+            first_excess_argument_index: get_argument_index(
+                first_excess_argument_index,
+                num_synthetic_args,
+            ),
             expected_positional_count: parameters.positional().count(),
             provided_positional_count: next_positional,
         });
@@ -91,7 +109,8 @@ pub(crate) fn bind_call<'db>(
     for (index, bound_ty) in parameter_tys.iter().enumerate() {
         if bound_ty.is_none() {
             let param = &parameters[index];
-            if param.is_variadic() || param.is_keyword_variadic() || param.default_ty().is_some() {
+            if param.is_variadic() || param.is_keyword_variadic() || param.default_type().is_some()
+            {
                 // variadic/keywords and defaulted arguments are not required
                 continue;
             }
@@ -107,10 +126,10 @@ pub(crate) fn bind_call<'db>(
 
     CallBinding {
         callable_ty,
-        return_ty: signature.return_ty.unwrap_or(Type::Unknown),
+        return_ty: signature.return_ty.unwrap_or(Type::unknown()),
         parameter_tys: parameter_tys
             .into_iter()
-            .map(|opt_ty| opt_ty.unwrap_or(Type::Unknown))
+            .map(|opt_ty| opt_ty.unwrap_or(Type::unknown()))
             .collect(),
         errors,
     }
@@ -119,7 +138,7 @@ pub(crate) fn bind_call<'db>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallBinding<'db> {
     /// Type of the callable object (function, class...)
-    callable_ty: Option<Type<'db>>,
+    callable_ty: Type<'db>,
 
     /// Return type of the call.
     return_ty: Type<'db>,
@@ -133,36 +152,36 @@ pub(crate) struct CallBinding<'db> {
 
 impl<'db> CallBinding<'db> {
     // TODO remove this constructor and construct always from `bind_call`
-    pub(crate) fn from_return_ty(return_ty: Type<'db>) -> Self {
+    pub(crate) fn from_return_type(return_ty: Type<'db>) -> Self {
         Self {
-            callable_ty: None,
+            callable_ty: todo_type!("CallBinding::from_return_type"),
             return_ty,
             parameter_tys: Box::default(),
             errors: vec![],
         }
     }
 
-    pub(crate) fn set_return_ty(&mut self, return_ty: Type<'db>) {
+    pub(crate) fn set_return_type(&mut self, return_ty: Type<'db>) {
         self.return_ty = return_ty;
     }
 
-    pub(crate) fn return_ty(&self) -> Type<'db> {
+    pub(crate) fn return_type(&self) -> Type<'db> {
         self.return_ty
     }
 
-    pub(crate) fn parameter_tys(&self) -> &[Type<'db>] {
+    pub(crate) fn parameter_types(&self) -> &[Type<'db>] {
         &self.parameter_tys
     }
 
-    pub(crate) fn one_parameter_ty(&self) -> Option<Type<'db>> {
-        match self.parameter_tys() {
+    pub(crate) fn one_parameter_type(&self) -> Option<Type<'db>> {
+        match self.parameter_types() {
             [ty] => Some(*ty),
             _ => None,
         }
     }
 
-    pub(crate) fn two_parameter_tys(&self) -> Option<(Type<'db>, Type<'db>)> {
-        match self.parameter_tys() {
+    pub(crate) fn two_parameter_types(&self) -> Option<(Type<'db>, Type<'db>)> {
+        match self.parameter_types() {
             [first, second] => Some((*first, *second)),
             _ => None,
         }
@@ -170,8 +189,8 @@ impl<'db> CallBinding<'db> {
 
     fn callable_name(&self, db: &'db dyn Db) -> Option<&str> {
         match self.callable_ty {
-            Some(Type::FunctionLiteral(function)) => Some(function.name(db)),
-            Some(Type::ClassLiteral(class_type)) => Some(class_type.class.name(db)),
+            Type::FunctionLiteral(function) => Some(function.name(db)),
+            Type::ClassLiteral(class_type) => Some(class_type.class.name(db)),
             _ => None,
         }
     }
@@ -243,7 +262,7 @@ pub(crate) enum CallBindingError<'db> {
     /// parameter.
     InvalidArgumentType {
         parameter: ParameterContext,
-        argument_index: usize,
+        argument_index: Option<usize>,
         expected_ty: Type<'db>,
         provided_ty: Type<'db>,
     },
@@ -252,17 +271,17 @@ pub(crate) enum CallBindingError<'db> {
     /// A call argument can't be matched to any parameter.
     UnknownArgument {
         argument_name: ast::name::Name,
-        argument_index: usize,
+        argument_index: Option<usize>,
     },
     /// More positional arguments are provided in the call than can be handled by the signature.
     TooManyPositionalArguments {
-        first_excess_argument_index: usize,
+        first_excess_argument_index: Option<usize>,
         expected_positional_count: usize,
         provided_positional_count: usize,
     },
     /// Multiple arguments were provided for a single parameter.
     ParameterAlreadyAssigned {
-        argument_index: usize,
+        argument_index: Option<usize>,
         parameter: ParameterContext,
     },
 }
@@ -372,11 +391,11 @@ impl<'db> CallBindingError<'db> {
         }
     }
 
-    fn get_node(node: ast::AnyNodeRef, argument_index: usize) -> ast::AnyNodeRef {
-        // If we have a Call node, report the diagnostic on the correct argument node;
-        // otherwise, report it on the entire provided node.
-        match node {
-            ast::AnyNodeRef::ExprCall(call_node) => {
+    fn get_node(node: ast::AnyNodeRef, argument_index: Option<usize>) -> ast::AnyNodeRef {
+        // If we have a Call node and an argument index, report the diagnostic on the correct
+        // argument node; otherwise, report it on the entire provided node.
+        match (node, argument_index) {
+            (ast::AnyNodeRef::ExprCall(call_node), Some(argument_index)) => {
                 match call_node
                     .arguments
                     .arguments_source_order()
