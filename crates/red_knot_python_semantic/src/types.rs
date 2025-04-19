@@ -26,7 +26,7 @@ pub(crate) use self::infer::{
 };
 pub(crate) use self::narrow::KnownConstraintFunction;
 pub(crate) use self::signatures::{CallableSignature, Signature, Signatures};
-pub(crate) use self::subclass_of::SubclassOfType;
+pub(crate) use self::subclass_of::{SubclassOfInner, SubclassOfType};
 use crate::module_name::ModuleName;
 use crate::module_resolver::{file_to_module, resolve_module, KnownModule};
 use crate::semantic_index::ast_ids::{HasScopedExpressionId, HasScopedUseId};
@@ -147,6 +147,12 @@ enum AttributeKind {
     NormalOrNonDataDescriptor,
 }
 
+impl AttributeKind {
+    const fn is_data(self) -> bool {
+        matches!(self, Self::DataDescriptor)
+    }
+}
+
 /// This enum is used to control the behavior of the descriptor protocol implementation.
 /// When invoked on a class object, the fallback type (a class attribute) can shadow a
 /// non-data descriptor of the meta-type (the class's metaclass). However, this is not
@@ -217,10 +223,24 @@ impl Default for MemberLookupPolicy {
     }
 }
 
-impl AttributeKind {
-    const fn is_data(self) -> bool {
-        matches!(self, Self::DataDescriptor)
-    }
+fn member_lookup_cycle_recover<'db>(
+    _db: &'db dyn Db,
+    _value: &SymbolAndQualifiers<'db>,
+    _count: u32,
+    _self: Type<'db>,
+    _name: Name,
+    _policy: MemberLookupPolicy,
+) -> salsa::CycleRecoveryAction<SymbolAndQualifiers<'db>> {
+    salsa::CycleRecoveryAction::Iterate
+}
+
+fn member_lookup_cycle_initial<'db>(
+    _db: &'db dyn Db,
+    _self: Type<'db>,
+    _name: Name,
+    _policy: MemberLookupPolicy,
+) -> SymbolAndQualifiers<'db> {
+    Symbol::bound(Type::Never).into()
 }
 
 /// Meta data for `Type::Todo`, which represents a known limitation in red-knot.
@@ -479,7 +499,11 @@ impl<'db> Type<'db> {
 
     pub fn contains_todo(&self, db: &'db dyn Db) -> bool {
         match self {
-            Self::Dynamic(DynamicType::Todo(_) | DynamicType::TodoProtocol) => true,
+            Self::Dynamic(
+                DynamicType::Todo(_)
+                | DynamicType::SubscriptedProtocol
+                | DynamicType::SubscriptedGeneric,
+            ) => true,
 
             Self::AlwaysFalsy
             | Self::AlwaysTruthy
@@ -520,9 +544,13 @@ impl<'db> Type<'db> {
             }
 
             Self::SubclassOf(subclass_of) => match subclass_of.subclass_of() {
-                ClassBase::Dynamic(DynamicType::Todo(_) | DynamicType::TodoProtocol) => true,
-                ClassBase::Dynamic(DynamicType::Unknown | DynamicType::Any) => false,
-                ClassBase::Class(_) => false,
+                SubclassOfInner::Dynamic(
+                    DynamicType::Todo(_)
+                    | DynamicType::SubscriptedProtocol
+                    | DynamicType::SubscriptedGeneric,
+                ) => true,
+                SubclassOfInner::Dynamic(DynamicType::Unknown | DynamicType::Any) => false,
+                SubclassOfInner::Class(_) => false,
             },
 
             Self::TypeVar(typevar) => match typevar.bound_or_constraints(db) {
@@ -537,10 +565,18 @@ impl<'db> Type<'db> {
             Self::BoundSuper(bound_super) => {
                 matches!(
                     bound_super.pivot_class(db),
-                    ClassBase::Dynamic(DynamicType::Todo(_) | DynamicType::TodoProtocol)
+                    ClassBase::Dynamic(
+                        DynamicType::Todo(_)
+                            | DynamicType::SubscriptedGeneric
+                            | DynamicType::SubscriptedProtocol
+                    )
                 ) || matches!(
                     bound_super.owner(db),
-                    SuperOwnerKind::Dynamic(DynamicType::Todo(_) | DynamicType::TodoProtocol)
+                    SuperOwnerKind::Dynamic(
+                        DynamicType::Todo(_)
+                            | DynamicType::SubscriptedGeneric
+                            | DynamicType::SubscriptedProtocol
+                    )
                 )
             }
 
@@ -1362,6 +1398,10 @@ impl<'db> Type<'db> {
                 )
             }
 
+            (Type::Instance(self_instance), Type::Instance(target_instance)) => {
+                self_instance.is_assignable_to(db, target_instance)
+            }
+
             (Type::Callable(self_callable), Type::Callable(target_callable)) => {
                 self_callable.is_assignable_to(db, target_callable)
             }
@@ -1376,7 +1416,7 @@ impl<'db> Type<'db> {
                 .into_callable_type(db)
                 .is_assignable_to(db, target),
 
-            // TODO other types containing gradual forms (e.g. generics containing Any/Unknown)
+            // TODO other types containing gradual forms
             _ => self.is_subtype_of(db, target),
         }
     }
@@ -1396,26 +1436,9 @@ impl<'db> Type<'db> {
             }
             (Type::Tuple(left), Type::Tuple(right)) => left.is_equivalent_to(db, right),
             (Type::Callable(left), Type::Callable(right)) => left.is_equivalent_to(db, right),
+            (Type::Instance(left), Type::Instance(right)) => left.is_equivalent_to(db, right),
             _ => self == other && self.is_fully_static(db) && other.is_fully_static(db),
         }
-    }
-
-    /// Returns true if both `self` and `other` are the same gradual form
-    /// (limited to `Any`, `Unknown`, or `Todo`).
-    pub(crate) fn is_same_gradual_form(self, other: Type<'db>) -> bool {
-        matches!(
-            (self, other),
-            (
-                Type::Dynamic(DynamicType::Any),
-                Type::Dynamic(DynamicType::Any)
-            ) | (
-                Type::Dynamic(DynamicType::Unknown),
-                Type::Dynamic(DynamicType::Unknown)
-            ) | (
-                Type::Dynamic(DynamicType::Todo(_)),
-                Type::Dynamic(DynamicType::Todo(_))
-            )
-        )
     }
 
     /// Returns true if this type and `other` are gradual equivalent.
@@ -1441,12 +1464,16 @@ impl<'db> Type<'db> {
             (Type::SubclassOf(first), Type::SubclassOf(second)) => {
                 match (first.subclass_of(), second.subclass_of()) {
                     (first, second) if first == second => true,
-                    (ClassBase::Dynamic(_), ClassBase::Dynamic(_)) => true,
+                    (SubclassOfInner::Dynamic(_), SubclassOfInner::Dynamic(_)) => true,
                     _ => false,
                 }
             }
 
             (Type::TypeVar(first), Type::TypeVar(second)) => first == second,
+
+            (Type::Instance(first), Type::Instance(second)) => {
+                first.is_gradual_equivalent_to(db, second)
+            }
 
             (Type::Tuple(first), Type::Tuple(second)) => first.is_gradual_equivalent_to(db, second),
 
@@ -1604,16 +1631,16 @@ impl<'db> Type<'db> {
             (Type::SubclassOf(subclass_of_ty), Type::ClassLiteral(class_b))
             | (Type::ClassLiteral(class_b), Type::SubclassOf(subclass_of_ty)) => {
                 match subclass_of_ty.subclass_of() {
-                    ClassBase::Dynamic(_) => false,
-                    ClassBase::Class(class_a) => !class_b.is_subclass_of(db, None, class_a),
+                    SubclassOfInner::Dynamic(_) => false,
+                    SubclassOfInner::Class(class_a) => !class_b.is_subclass_of(db, None, class_a),
                 }
             }
 
             (Type::SubclassOf(subclass_of_ty), Type::GenericAlias(alias_b))
             | (Type::GenericAlias(alias_b), Type::SubclassOf(subclass_of_ty)) => {
                 match subclass_of_ty.subclass_of() {
-                    ClassBase::Dynamic(_) => false,
-                    ClassBase::Class(class_a) => {
+                    SubclassOfInner::Dynamic(_) => false,
+                    SubclassOfInner::Class(class_a) => {
                         !ClassType::from(alias_b).is_subclass_of(db, class_a)
                     }
                 }
@@ -1662,10 +1689,10 @@ impl<'db> Type<'db> {
             // so although the type is dynamic we can still determine disjointedness in some situations
             (Type::SubclassOf(subclass_of_ty), other)
             | (other, Type::SubclassOf(subclass_of_ty)) => match subclass_of_ty.subclass_of() {
-                ClassBase::Dynamic(_) => {
+                SubclassOfInner::Dynamic(_) => {
                     KnownClass::Type.to_instance(db).is_disjoint_from(db, other)
                 }
-                ClassBase::Class(class) => class
+                SubclassOfInner::Class(class) => class
                     .metaclass_instance_type(db)
                     .is_disjoint_from(db, other),
             },
@@ -2622,7 +2649,7 @@ impl<'db> Type<'db> {
 
     /// Similar to [`Type::member`], but allows the caller to specify what policy should be used
     /// when looking up attributes. See [`MemberLookupPolicy`] for more information.
-    #[salsa::tracked]
+    #[salsa::tracked(cycle_fn=member_lookup_cycle_recover, cycle_initial=member_lookup_cycle_initial)]
     fn member_lookup_with_policy(
         self,
         db: &'db dyn Db,
@@ -3044,8 +3071,8 @@ impl<'db> Type<'db> {
                 .try_bool_impl(db, allow_short_circuit)?,
 
             Type::SubclassOf(subclass_of_ty) => match subclass_of_ty.subclass_of() {
-                ClassBase::Dynamic(_) => Truthiness::Ambiguous,
-                ClassBase::Class(class) => {
+                SubclassOfInner::Dynamic(_) => Truthiness::Ambiguous,
+                SubclassOfInner::Class(class) => {
                     Type::from(class).try_bool_impl(db, allow_short_circuit)?
                 }
             },
@@ -3783,12 +3810,14 @@ impl<'db> Type<'db> {
             }
 
             Type::SubclassOf(subclass_of_type) => match subclass_of_type.subclass_of() {
-                ClassBase::Dynamic(dynamic_type) => Type::Dynamic(dynamic_type).signatures(db),
+                SubclassOfInner::Dynamic(dynamic_type) => {
+                    Type::Dynamic(dynamic_type).signatures(db)
+                }
                 // Most type[] constructor calls are handled by `try_call_constructor` and not via
                 // getting the signature here. This signature can still be used in some cases (e.g.
                 // evaluating callable subtyping). TODO improve this definition (intersection of
                 // `__new__` and `__init__` signatures? and respect metaclass `__call__`).
-                ClassBase::Class(class) => Type::from(class).signatures(db),
+                SubclassOfInner::Class(class) => Type::from(class).signatures(db),
             },
 
             Type::Instance(_) => {
@@ -4351,6 +4380,10 @@ impl<'db> Type<'db> {
                     invalid_expressions: smallvec::smallvec![InvalidTypeExpression::Protocol],
                     fallback_type: Type::unknown(),
                 }),
+                KnownInstanceType::Generic => Err(InvalidTypeExpressionError {
+                    invalid_expressions: smallvec::smallvec![InvalidTypeExpression::Generic],
+                    fallback_type: Type::unknown(),
+                }),
 
                 KnownInstanceType::Literal
                 | KnownInstanceType::Union
@@ -4535,21 +4568,21 @@ impl<'db> Type<'db> {
             Type::ClassLiteral(class) => class.metaclass(db),
             Type::GenericAlias(alias) => ClassType::from(*alias).metaclass(db),
             Type::SubclassOf(subclass_of_ty) => match subclass_of_ty.subclass_of() {
-                ClassBase::Dynamic(_) => *self,
-                ClassBase::Class(class) => SubclassOfType::from(
+                SubclassOfInner::Dynamic(_) => *self,
+                SubclassOfInner::Class(class) => SubclassOfType::from(
                     db,
-                    ClassBase::try_from_type(db, class.metaclass(db))
-                        .unwrap_or(ClassBase::unknown()),
+                    SubclassOfInner::try_from_type(db, class.metaclass(db))
+                        .unwrap_or(SubclassOfInner::unknown()),
                 ),
             },
 
             Type::StringLiteral(_) | Type::LiteralString => KnownClass::Str.to_class_literal(db),
-            Type::Dynamic(dynamic) => SubclassOfType::from(db, ClassBase::Dynamic(*dynamic)),
+            Type::Dynamic(dynamic) => SubclassOfType::from(db, SubclassOfInner::Dynamic(*dynamic)),
             // TODO intersections
             Type::Intersection(_) => SubclassOfType::from(
                 db,
-                ClassBase::try_from_type(db, todo_type!("Intersection meta-type"))
-                    .expect("Type::Todo should be a valid ClassBase"),
+                SubclassOfInner::try_from_type(db, todo_type!("Intersection meta-type"))
+                    .expect("Type::Todo should be a valid `SubclassOfInner`"),
             ),
             Type::AlwaysTruthy | Type::AlwaysFalsy => KnownClass::Type.to_instance(db),
             Type::BoundSuper(_) => KnownClass::Super.to_class_literal(db),
@@ -4751,8 +4784,8 @@ impl<'db> Type<'db> {
             },
 
             Self::SubclassOf(subclass_of_type) => match subclass_of_type.subclass_of() {
-                ClassBase::Class(class) => Some(TypeDefinition::Class(class.definition(db))),
-                ClassBase::Dynamic(_) => None,
+                SubclassOfInner::Class(class) => Some(TypeDefinition::Class(class.definition(db))),
+                SubclassOfInner::Dynamic(_) => None,
             },
 
             Self::StringLiteral(_)
@@ -4804,9 +4837,12 @@ pub enum DynamicType {
     ///
     /// This variant should be created with the `todo_type!` macro.
     Todo(TodoType),
-    /// Temporary type until we support protocols. We use a separate variant (instead of `Todo(…)`)
-    /// in order to be able to match on them explicitly.
-    TodoProtocol,
+    /// Temporary type until we support generic protocols.
+    /// We use a separate variant (instead of `Todo(…)`) in order to be able to match on them explicitly.
+    SubscriptedProtocol,
+    /// Temporary type until we support old-style generics.
+    /// We use a separate variant (instead of `Todo(…)`) in order to be able to match on them explicitly.
+    SubscriptedGeneric,
 }
 
 impl std::fmt::Display for DynamicType {
@@ -4817,8 +4853,13 @@ impl std::fmt::Display for DynamicType {
             // `DynamicType::Todo`'s display should be explicit that is not a valid display of
             // any other type
             DynamicType::Todo(todo) => write!(f, "@Todo{todo}"),
-            DynamicType::TodoProtocol => f.write_str(if cfg!(debug_assertions) {
-                "@Todo(protocol)"
+            DynamicType::SubscriptedProtocol => f.write_str(if cfg!(debug_assertions) {
+                "@Todo(`Protocol[]` subscript)"
+            } else {
+                "@Todo"
+            }),
+            DynamicType::SubscriptedGeneric => f.write_str(if cfg!(debug_assertions) {
+                "@Todo(`Generic[]` subscript)"
             } else {
                 "@Todo"
             }),
@@ -4930,8 +4971,10 @@ enum InvalidTypeExpression<'db> {
     RequiresArguments(Type<'db>),
     /// Some types always require at least two arguments when used in a type expression
     RequiresTwoArguments(Type<'db>),
-    /// The `Protocol` type is invalid in type expressions
+    /// The `Protocol` class is invalid in type expressions
     Protocol,
+    /// Same for `Generic`
+    Generic,
     /// Type qualifiers are always invalid in *type expressions*,
     /// but these ones are okay with 0 arguments in *annotation expressions*
     TypeQualifier(KnownInstanceType<'db>),
@@ -4969,6 +5012,9 @@ impl<'db> InvalidTypeExpression<'db> {
                     ),
                     InvalidTypeExpression::Protocol => f.write_str(
                         "`typing.Protocol` is not allowed in type expressions"
+                    ),
+                    InvalidTypeExpression::Generic => f.write_str(
+                        "`typing.Generic` is not allowed in type expressions"
                     ),
                     InvalidTypeExpression::TypeQualifier(qualifier) => write!(
                         f,

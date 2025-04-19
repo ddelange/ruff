@@ -246,7 +246,7 @@ impl<'db> ClassType<'db> {
     /// cases rather than simply iterating over the inferred resolution order for the class.
     ///
     /// [method resolution order]: https://docs.python.org/3/glossary.html#term-method-resolution-order
-    pub(super) fn iter_mro(self, db: &'db dyn Db) -> impl Iterator<Item = ClassBase<'db>> {
+    pub(super) fn iter_mro(self, db: &'db dyn Db) -> MroIterator<'db> {
         let (class_literal, specialization) = self.class_literal(db);
         class_literal.iter_mro(db, specialization)
     }
@@ -257,11 +257,107 @@ impl<'db> ClassType<'db> {
         class_literal.is_final(db)
     }
 
+    /// If `self` and `other` are generic aliases of the same generic class, returns their
+    /// corresponding specializations.
+    fn compatible_specializations(
+        self,
+        db: &'db dyn Db,
+        other: ClassType<'db>,
+    ) -> Option<(Specialization<'db>, Specialization<'db>)> {
+        match (self, other) {
+            (ClassType::Generic(self_generic), ClassType::Generic(other_generic)) => {
+                if self_generic.origin(db) == other_generic.origin(db) {
+                    Some((
+                        self_generic.specialization(db),
+                        other_generic.specialization(db),
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Return `true` if `other` is present in this class's MRO.
     pub(super) fn is_subclass_of(self, db: &'db dyn Db, other: ClassType<'db>) -> bool {
         // `is_subclass_of` is checking the subtype relation, in which gradual types do not
         // participate, so we should not return `True` if we find `Any/Unknown` in the MRO.
-        self.iter_mro(db).contains(&ClassBase::Class(other))
+        if self.iter_mro(db).contains(&ClassBase::Class(other)) {
+            return true;
+        }
+
+        // `self` is a subclass of `other` if they are both generic aliases of the same generic
+        // class, and their specializations are compatible, taking into account the variance of the
+        // class's typevars.
+        if let Some((self_specialization, other_specialization)) =
+            self.compatible_specializations(db, other)
+        {
+            if self_specialization.is_subtype_of(db, other_specialization) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub(super) fn is_equivalent_to(self, db: &'db dyn Db, other: ClassType<'db>) -> bool {
+        if self == other {
+            return true;
+        }
+
+        // `self` is equivalent to `other` if they are both generic aliases of the same generic
+        // class, and their specializations are compatible, taking into account the variance of the
+        // class's typevars.
+        if let Some((self_specialization, other_specialization)) =
+            self.compatible_specializations(db, other)
+        {
+            if self_specialization.is_equivalent_to(db, other_specialization) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub(super) fn is_assignable_to(self, db: &'db dyn Db, other: ClassType<'db>) -> bool {
+        // `is_subclass_of` is checking the subtype relation, in which gradual types do not
+        // participate, so we should not return `True` if we find `Any/Unknown` in the MRO.
+        if self.is_subclass_of(db, other) {
+            return true;
+        }
+
+        // `self` is assignable to `other` if they are both generic aliases of the same generic
+        // class, and their specializations are compatible, taking into account the variance of the
+        // class's typevars.
+        if let Some((self_specialization, other_specialization)) =
+            self.compatible_specializations(db, other)
+        {
+            if self_specialization.is_assignable_to(db, other_specialization) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub(super) fn is_gradual_equivalent_to(self, db: &'db dyn Db, other: ClassType<'db>) -> bool {
+        if self == other {
+            return true;
+        }
+
+        // `self` is equivalent to `other` if they are both generic aliases of the same generic
+        // class, and their specializations are compatible, taking into account the variance of the
+        // class's typevars.
+        if let Some((self_specialization, other_specialization)) =
+            self.compatible_specializations(db, other)
+        {
+            if self_specialization.is_gradual_equivalent_to(db, other_specialization) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Return the metaclass of this class, or `type[Unknown]` if the metaclass cannot be inferred.
@@ -549,7 +645,7 @@ impl<'db> ClassLiteralType<'db> {
         self,
         db: &'db dyn Db,
         specialization: Option<Specialization<'db>>,
-    ) -> impl Iterator<Item = ClassBase<'db>> {
+    ) -> MroIterator<'db> {
         MroIterator::new(db, self, specialization)
     }
 
@@ -750,7 +846,11 @@ impl<'db> ClassLiteralType<'db> {
 
         for superclass in mro_iter {
             match superclass {
-                ClassBase::Dynamic(DynamicType::TodoProtocol) => {
+                ClassBase::Dynamic(
+                    DynamicType::SubscriptedGeneric | DynamicType::SubscriptedProtocol,
+                )
+                | ClassBase::Generic
+                | ClassBase::Protocol => {
                     // TODO: We currently skip `Protocol` when looking up class members, in order to
                     // avoid creating many dynamic types in our test suite that would otherwise
                     // result from looking up attributes on builtin types like `str`, `list`, `tuple`
@@ -769,7 +869,12 @@ impl<'db> ClassLiteralType<'db> {
                         continue;
                     }
 
-                    if class.is_known(db, KnownClass::Type) && policy.meta_class_no_type_fallback()
+                    // HACK: we should implement some more general logic here that supports arbitrary custom
+                    // metaclasses, not just `type` and `ABCMeta`.
+                    if matches!(
+                        class.known(db),
+                        Some(KnownClass::Type | KnownClass::ABCMeta)
+                    ) && policy.meta_class_no_type_fallback()
                     {
                         continue;
                     }
@@ -1062,8 +1167,12 @@ impl<'db> ClassLiteralType<'db> {
 
         for superclass in self.iter_mro(db, specialization) {
             match superclass {
-                ClassBase::Dynamic(DynamicType::TodoProtocol) => {
-                    // TODO: We currently skip `Protocol` when looking up instance members, in order to
+                ClassBase::Dynamic(
+                    DynamicType::SubscriptedProtocol | DynamicType::SubscriptedGeneric,
+                )
+                | ClassBase::Generic
+                | ClassBase::Protocol => {
+                    // TODO: We currently skip these when looking up instance members, in order to
                     // avoid creating many dynamic types in our test suite that would otherwise
                     // result from looking up attributes on builtin types like `str`, `list`, `tuple`
                 }
@@ -1307,14 +1416,42 @@ impl<'db> ClassLiteralType<'db> {
                             }
                         }
                     }
-                    DefinitionKind::Comprehension(_) => {
-                        // TODO:
+                    DefinitionKind::Comprehension(comprehension) => {
+                        match comprehension.target_kind() {
+                            TargetKind::Sequence(_, unpack) => {
+                                // We found an unpacking assignment like:
+                                //
+                                //     [... for .., self.name, .. in <iterable>]
+
+                                let unpacked = infer_unpack_types(db, unpack);
+                                let target_ast_id = comprehension
+                                    .target()
+                                    .scoped_expression_id(db, unpack.target_scope(db));
+                                let inferred_ty = unpacked.expression_type(target_ast_id);
+
+                                union_of_inferred_types = union_of_inferred_types.add(inferred_ty);
+                            }
+                            TargetKind::NameOrAttribute => {
+                                // We found an attribute assignment like:
+                                //
+                                //     [... for self.name in <iterable>]
+
+                                let iterable_ty = infer_expression_type(
+                                    db,
+                                    index.expression(comprehension.iterable()),
+                                );
+                                // TODO: Potential diagnostics resulting from the iterable are currently not reported.
+                                let inferred_ty = iterable_ty.iterate(db);
+
+                                union_of_inferred_types = union_of_inferred_types.add(inferred_ty);
+                            }
+                        }
                     }
                     DefinitionKind::AugmentedAssignment(_) => {
                         // TODO:
                     }
                     DefinitionKind::NamedExpression(_) => {
-                        // TODO:
+                        // A named expression whose target is an attribute is syntactically prohibited
                     }
                     _ => {}
                 }
@@ -1516,6 +1653,22 @@ impl<'db> InstanceType<'db> {
         // N.B. The subclass relation is fully static
         self.class.is_subclass_of(db, other.class)
     }
+
+    pub(super) fn is_equivalent_to(self, db: &'db dyn Db, other: InstanceType<'db>) -> bool {
+        self.class.is_equivalent_to(db, other.class)
+    }
+
+    pub(super) fn is_assignable_to(self, db: &'db dyn Db, other: InstanceType<'db>) -> bool {
+        self.class.is_assignable_to(db, other.class)
+    }
+
+    pub(super) fn is_gradual_equivalent_to(
+        self,
+        db: &'db dyn Db,
+        other: InstanceType<'db>,
+    ) -> bool {
+        self.class.is_gradual_equivalent_to(db, other.class)
+    }
 }
 
 impl<'db> From<InstanceType<'db>> for Type<'db> {
@@ -1559,6 +1712,8 @@ pub(crate) enum KnownClass {
     Super,
     // enum
     Enum,
+    // abc
+    ABCMeta,
     // Types
     GenericAlias,
     ModuleType,
@@ -1668,6 +1823,7 @@ impl<'db> KnownClass {
             | Self::Float
             | Self::Sized
             | Self::Enum
+            | Self::ABCMeta
             // Evaluating `NotImplementedType` in a boolean context was deprecated in Python 3.9
             // and raises a `TypeError` in Python >=3.14
             // (see https://docs.python.org/3/library/constants.html#NotImplemented)
@@ -1724,6 +1880,7 @@ impl<'db> KnownClass {
             Self::Sized => "Sized",
             Self::OrderedDict => "OrderedDict",
             Self::Enum => "Enum",
+            Self::ABCMeta => "ABCMeta",
             Self::Super => "super",
             // For example, `typing.List` is defined as `List = _Alias()` in typeshed
             Self::StdlibAlias => "_Alias",
@@ -1880,6 +2037,7 @@ impl<'db> KnownClass {
             | Self::Super
             | Self::Property => KnownModule::Builtins,
             Self::VersionInfo => KnownModule::Sys,
+            Self::ABCMeta => KnownModule::Abc,
             Self::Enum => KnownModule::Enum,
             Self::GenericAlias
             | Self::ModuleType
@@ -1984,6 +2142,7 @@ impl<'db> KnownClass {
             | Self::TypeVarTuple
             | Self::Sized
             | Self::Enum
+            | Self::ABCMeta
             | Self::Super
             | Self::NewType => false,
         }
@@ -2043,6 +2202,7 @@ impl<'db> KnownClass {
             | Self::TypeVarTuple
             | Self::Sized
             | Self::Enum
+            | Self::ABCMeta
             | Self::Super
             | Self::UnionType
             | Self::NewType => false,
@@ -2104,6 +2264,7 @@ impl<'db> KnownClass {
             "SupportsIndex" => Self::SupportsIndex,
             "Sized" => Self::Sized,
             "Enum" => Self::Enum,
+            "ABCMeta" => Self::ABCMeta,
             "super" => Self::Super,
             "_version_info" => Self::VersionInfo,
             "ellipsis" if Program::get(db).python_version(db) <= PythonVersion::PY39 => {
@@ -2159,6 +2320,7 @@ impl<'db> KnownClass {
             | Self::MethodType
             | Self::MethodWrapperType
             | Self::Enum
+            | Self::ABCMeta
             | Self::Super
             | Self::NotImplementedType
             | Self::UnionType
@@ -2281,6 +2443,8 @@ pub enum KnownInstanceType<'db> {
     OrderedDict,
     /// The symbol `typing.Protocol` (which can also be found as `typing_extensions.Protocol`)
     Protocol,
+    /// The symbol `typing.Generic` (which can also be found as `typing_extensions.Generic`)
+    Generic,
     /// The symbol `typing.Type` (which can also be found as `typing_extensions.Type`)
     Type,
     /// A single instance of `typing.TypeVar`
@@ -2355,6 +2519,7 @@ impl<'db> KnownInstanceType<'db> {
             | Self::ChainMap
             | Self::OrderedDict
             | Self::Protocol
+            | Self::Generic
             | Self::ReadOnly
             | Self::TypeAliasType(_)
             | Self::Unknown
@@ -2401,6 +2566,7 @@ impl<'db> KnownInstanceType<'db> {
             Self::ChainMap => "typing.ChainMap",
             Self::OrderedDict => "typing.OrderedDict",
             Self::Protocol => "typing.Protocol",
+            Self::Generic => "typing.Generic",
             Self::ReadOnly => "typing.ReadOnly",
             Self::TypeVar(typevar) => typevar.name(db),
             Self::TypeAliasType(_) => "typing.TypeAliasType",
@@ -2448,7 +2614,8 @@ impl<'db> KnownInstanceType<'db> {
             Self::Deque => KnownClass::StdlibAlias,
             Self::ChainMap => KnownClass::StdlibAlias,
             Self::OrderedDict => KnownClass::StdlibAlias,
-            Self::Protocol => KnownClass::SpecialForm,
+            Self::Protocol => KnownClass::SpecialForm, // actually `_ProtocolMeta` at runtime but this is what typeshed says
+            Self::Generic => KnownClass::SpecialForm, // actually `type` at runtime but this is what typeshed says
             Self::TypeVar(_) => KnownClass::TypeVar,
             Self::TypeAliasType(_) => KnownClass::TypeAliasType,
             Self::TypeOf => KnownClass::SpecialForm,
@@ -2492,6 +2659,7 @@ impl<'db> KnownInstanceType<'db> {
             "Counter" => Self::Counter,
             "ChainMap" => Self::ChainMap,
             "OrderedDict" => Self::OrderedDict,
+            "Generic" => Self::Generic,
             "Protocol" => Self::Protocol,
             "Optional" => Self::Optional,
             "Union" => Self::Union,
@@ -2550,6 +2718,7 @@ impl<'db> KnownInstanceType<'db> {
             | Self::NoReturn
             | Self::Tuple
             | Self::Type
+            | Self::Generic
             | Self::Callable => module.is_typing(),
             Self::Annotated
             | Self::Protocol
