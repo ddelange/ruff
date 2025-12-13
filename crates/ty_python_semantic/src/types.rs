@@ -7994,7 +7994,7 @@ impl<'db> Type<'db> {
     ) {
         let matching_typevar = |bound_typevar: &BoundTypeVarInstance<'db>| {
             match bound_typevar.typevar(db).kind(db) {
-                TypeVarKind::Legacy | TypeVarKind::TypingSelf
+                TypeVarKind::Legacy | TypeVarKind::Pep613Alias | TypeVarKind::TypingSelf
                     if binding_context.is_none_or(|binding_context| {
                         bound_typevar.binding_context(db)
                             == BindingContext::Definition(binding_context)
@@ -8314,6 +8314,7 @@ impl<'db> Type<'db> {
                 KnownInstanceType::TypeAliasType(type_alias) => {
                     type_alias.definition(db).map(TypeDefinition::TypeAlias)
                 }
+                KnownInstanceType::NewType(newtype) => Some(TypeDefinition::NewType(newtype.definition(db))),
                 _ => None,
             },
 
@@ -9471,6 +9472,8 @@ pub enum TypeVarKind {
     ParamSpec,
     /// `def foo[**P]() -> None: ...`
     Pep695ParamSpec,
+    /// `Alias: typing.TypeAlias = T`
+    Pep613Alias,
 }
 
 impl TypeVarKind {
