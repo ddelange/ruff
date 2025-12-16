@@ -637,7 +637,9 @@ impl<'db> ClassType<'db> {
                     | TypeRelation::SubtypingAssuming(_) => {
                         ConstraintSet::from(other.is_object(db))
                     }
-                    TypeRelation::Assignability => ConstraintSet::from(!other.is_final(db)),
+                    TypeRelation::Assignability | TypeRelation::ConstraintSetAssignability => {
+                        ConstraintSet::from(!other.is_final(db))
+                    }
                 },
 
                 // Protocol, Generic, and TypedDict are not represented by a ClassType.
@@ -1255,6 +1257,7 @@ impl<'db> ClassType<'db> {
                     let self_annotation = signature
                         .parameters()
                         .get_positional(0)
+                        .filter(|parameter| !parameter.inferred_annotation)
                         .and_then(Parameter::annotated_type)
                         .filter(|ty| {
                             ty.as_typevar()
